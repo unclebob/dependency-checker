@@ -1,4 +1,4 @@
-;; mutation-tested: 2026-03-04
+;; mutation-tested: 2026-03-07
 (ns dependency-checker.core.base.reader
   (:require [clojure.java.io :as io]))
 

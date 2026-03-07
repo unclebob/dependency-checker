@@ -1,4 +1,4 @@
-;; mutation-tested: 2026-03-04
+;; mutation-tested: 2026-03-07
 (ns dependency-checker.core.graph
   (:require [dependency-checker.core.base.config :as cfg]
             [dependency-checker.core.base.parse :as parse]))

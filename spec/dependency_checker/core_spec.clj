@@ -7,6 +7,7 @@
             [dependency-checker.core.base.dependencies :as dep-base]
             [dependency-checker.core.base.reader :as reader-base]
             [dependency-checker.core.base.stats :as stats-base]
+            [dependency-checker.core.graph :as graph]
             [dependency-checker.core.infer :as infer]
             [dependency-checker.core :as tool]))
 
@@ -468,6 +469,19 @@
              (#'tool/compile-exception {:from-component :a})
              {:from-component :a :to-component :z :from-ns "x" :to-ns "y"})))
 
+  (it "does not add self dependencies when inferring allowed dependencies"
+    (let [records [{:namespace "demo.app.alpha.core"
+                    :requires #{"demo.app.alpha.util"}}
+                   {:namespace "demo.app.alpha.util"
+                    :requires #{}}
+                   {:namespace "demo.app.beta.core"
+                    :requires #{"demo.app.alpha.core"}}]
+          rules [{:component :alpha :match "demo.app.alpha*"}
+                 {:component :beta :match "demo.app.beta*"}]
+          inferred (infer/infer-allowed-deps records rules)]
+      (should= [] (get inferred :alpha))
+      (should= [:alpha] (get inferred :beta))))
+
   (it "infers abstract prefixes from fully abstract namespace trees"
     (let [records [{:namespace "demo.api.port" :public-count 1 :abstract-count 1}
                    {:namespace "demo.api.events" :public-count 1 :abstract-count 1}
@@ -526,4 +540,22 @@
           sccs (#'tool/strongly-connected-components nodes edges)
           sets (set (map set sccs))]
       (should (contains? sets #{:a}))
-      (should (contains? sets #{:b :c})))))
+      (should (contains? sets #{:b :c}))))
+
+  (it "finds forbidden violations only for matching component pairs"
+    (let [ns-edges [{:from-component :ui
+                     :to-component :db
+                     :from-ns "demo.ui.core"
+                     :to-ns "demo.db.core"}
+                    {:from-component :ui
+                     :to-component :svc
+                     :from-ns "demo.ui.core"
+                     :to-ns "demo.svc.core"}]
+          forbidden [{:from :ui :to :db}
+                     {:from :svc :to :db}]
+          violations (#'graph/find-forbidden-violations ns-edges forbidden [])]
+      (should= 1 (count violations))
+      (should= :ui (:from-component (first violations)))
+      (should= :db (:to-component (first violations)))
+      (should= {:from :ui :to :db}
+               (select-keys (:rule (first violations)) [:from :to])))))
