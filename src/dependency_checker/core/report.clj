@@ -1,4 +1,4 @@
-;; mutation-tested: 2026-03-07
+;; mutation-tested: 2026-03-08
 (ns dependency-checker.core.report
   (:require [clojure.edn :as edn]
             [clojure.java.io :as io]

@@ -177,6 +177,7 @@
         (should= "empire.adapters*" (:match (get by-component :adapters)))
         (should= "empire.acceptance*" (:match (get by-component :acceptance)))))
 
+
   (it "generates starter config allowed-dependencies from observed component edges"
     (let [root (temp-dir)]
       (write-file! root "demo/a/core.clj"

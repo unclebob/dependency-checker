@@ -1,2 +1,7 @@
 .cpcache/
+.idea/
+.toolbox
+AGENTS.md
 dependency-checker.edn
+dependency-checker.iml
+target/
