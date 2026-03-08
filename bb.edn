@@ -1,0 +1,5 @@
+{:paths ["src"]
+ :deps {}
+ :tasks {check-dependencies {:doc "Run dependency checker"
+                             :requires ([dependency-checker.core :as dc])
+                             :task (apply dc/-main *command-line-args*)}}}
