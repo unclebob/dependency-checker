@@ -1,8 +1,34 @@
 # Dependency Checker
 
-Analyzes component boundaries and architecture health for this project.
+Analyzes component boundaries and architecture health for Clojure projects.
 
-## Run
+## Usage in Your Project
+
+### Clojure CLI
+
+Add an alias to your `deps.edn`:
+
+```clojure
+{:aliases
+ {:check-dependencies
+  {:extra-deps {io.github.unclebob/dependency-checker {:git/tag "..." :git/sha "..."}}
+   :main-opts ["-m" "dependency-checker.core"]}}}
+```
+
+### Babashka
+
+Add a task to your `bb.edn`:
+
+```clojure
+{:tasks {check-dependencies {:doc "Run dependency checker"
+                             :extra-deps {io.github.unclebob/dependency-checker {:git/tag "..." :git/sha "..."}}
+                             :requires ([dependency-checker.core :as dc])
+                             :task (apply dc/-main *command-line-args*)}}}
+```
+
+Then run with `bb check-dependencies` (same arguments as below).
+
+### Running
 
     clj -M:check-dependencies
     clj -M:check-dependencies dependency-checker.edn
@@ -18,7 +44,7 @@ Create or recreate starter config:
 
 ## Working Directory Behavior
 
-The checker resolves paths from the directory where you run `clj` (the current working directory).
+The checker resolves paths from the current working directory.
 
 - Default config path `dependency-checker.edn` is resolved relative to the current working directory.
 - `:source-paths` entries are also resolved relative to the current working directory unless you use absolute paths.

@@ -281,33 +281,37 @@
 
   (it "run-cli creates config for --init"
     (let [root (temp-dir)
-          cfg-path (.getPath (io/file root "dep.edn"))]
-      (with-redefs [tool/generate-starter-config (fn [] {:source-paths ["src"] :component-rules []})]
-        (should= 0 (#'tool/run-cli [cfg-path "--init"])))
+          cfg-path (.getPath (io/file root "dep.edn"))
+          result (with-redefs [tool/generate-starter-config (fn [] {:source-paths ["src"] :component-rules []})]
+                   (let [code (atom nil)]
+                     (with-out-str (reset! code (#'tool/run-cli [cfg-path "--init"])))
+                     @code))]
+      (should= 0 result)
       (should (.exists (io/file cfg-path)))))
 
   (it "run-cli --init does not overwrite existing config"
     (let [root (temp-dir)
           cfg-path (.getPath (io/file root "dep.edn"))]
       (with-redefs [tool/generate-starter-config (fn [] {:source-paths ["src"] :component-rules []})]
-        (should= 0 (#'tool/run-cli [cfg-path "--init"])))
+        (with-out-str (#'tool/run-cli [cfg-path "--init"])))
       (let [before (slurp cfg-path)]
-        (should= 0 (#'tool/run-cli [cfg-path "--init"]))
+        (with-out-str (#'tool/run-cli [cfg-path "--init"]))
         (should= before (slurp cfg-path)))))
 
   (it "run-cli overwrites existing config for --force-init"
     (let [root (temp-dir)
           cfg-path (.getPath (io/file root "dep.edn"))]
       (with-redefs [tool/generate-starter-config (fn [] {:source-paths ["src"] :component-rules []})]
-        (should= 0 (#'tool/run-cli [cfg-path "--init"])))
+        (with-out-str (#'tool/run-cli [cfg-path "--init"])))
       (with-redefs [tool/generate-starter-config (fn [] {:source-paths ["other"] :component-rules []})]
-        (should= 0 (#'tool/run-cli [cfg-path "--force-init"])))
+        (with-out-str (#'tool/run-cli [cfg-path "--force-init"])))
       (should (str/includes? (slurp cfg-path) "other"))))
 
   (it "run-cli returns usage error when --init and --force-init are both set"
     (let [root (temp-dir)
           cfg-path (.getPath (io/file root "dep.edn"))]
-      (should= 2 (#'tool/run-cli [cfg-path "--init" "--force-init"]))))
+      (binding [*err* (java.io.StringWriter.)]
+        (should= 2 (#'tool/run-cli [cfg-path "--init" "--force-init"])))))
 
   (it "run-cli returns 2 for unsupported format"
     (let [root (temp-dir)
@@ -321,7 +325,8 @@
                                             :component-edges []
                                             :warnings []})
                     tool/report-text (fn [& _] nil)]
-        (should= 2 (#'tool/run-cli [cfg-path "--format" "xml"])))))
+        (binding [*err* (java.io.StringWriter.)]
+          (should= 2 (#'tool/run-cli [cfg-path "--format" "xml"]))))))
 
   (it "run-cli returns 1 when analysis fails"
     (let [root (temp-dir)
@@ -369,16 +374,21 @@
 
   (it "run-cli returns 0 for --force-init when config does not yet exist"
     (let [root (temp-dir)
-          cfg-path (.getPath (io/file root "dep.edn"))]
-      (with-redefs [tool/generate-starter-config (fn [] {:source-paths ["src"]})]
-        (should= 0 (#'tool/run-cli [cfg-path "--force-init"])))))
+          cfg-path (.getPath (io/file root "dep.edn"))
+          result (with-redefs [tool/generate-starter-config (fn [] {:source-paths ["src"]})]
+                   (let [code (atom nil)]
+                     (with-out-str (reset! code (#'tool/run-cli [cfg-path "--force-init"])))
+                     @code))]
+      (should= 0 result)))
 
   (it "run-cli returns usage error for unknown top-level argument"
-    (should= 2 (#'tool/run-cli ["--bogus"])))
+    (binding [*err* (java.io.StringWriter.)]
+      (should= 2 (#'tool/run-cli ["--bogus"]))))
 
   (it "run-cli returns usage error for missing --format value"
     (should= :usage (:error (#'tool/parse-args ["--format"])))
-    (should= 2 (#'tool/run-cli ["--format"])))
+    (binding [*err* (java.io.StringWriter.)]
+      (should= 2 (#'tool/run-cli ["--format"]))))
 
   (it "run-cli prints help and exits 0 for --help"
     (let [out (java.io.StringWriter.)]
