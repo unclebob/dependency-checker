@@ -7,9 +7,10 @@
             [dependency-checker.core.base.dependencies :as dep-base]
             [dependency-checker.core.base.reader :as reader-base]
             [dependency-checker.core.base.stats :as stats-base]
-            [dependency-checker.core.graph :as graph]
-            [dependency-checker.core.infer :as infer]
-            [dependency-checker.core :as tool]))
+             [dependency-checker.core.graph :as graph]
+             [dependency-checker.core.infer :as infer]
+             [dependency-checker.core.report :as report]
+             [dependency-checker.core :as tool]))
 
 (defn- temp-dir []
   (.toFile (java.nio.file.Files/createTempDirectory "dependency-tool-spec" (make-array java.nio.file.attribute.FileAttribute 0))))
@@ -67,7 +68,28 @@
         (should (< (Math/abs (- 0.6666666666666666 (get-in stats [:alpha :distance]))) 1.0e-9))
         (should (< (Math/abs (- 0.5 (get-in stats [:beta :instability]))) 1.0e-9))
         (should (< (Math/abs (- 0.0 (get-in stats [:beta :abstractness]))) 1.0e-9))
-        (should (< (Math/abs (- 0.5 (get-in stats [:beta :distance]))) 1.0e-9)))))
+        (should (< (Math/abs (- 0.5 (get-in stats [:beta :distance]))) 1.0e-9))
+        (should= :useless (get-in stats [:alpha :zone]))
+        (should= :pain (get-in stats [:beta :zone])))))
+
+  (it "uses healthy-threshold from config for zone classification"
+    (let [root (temp-dir)]
+      (write-file! root "demo/a.clj"
+                   "(ns demo.a (:require [demo.b :as b]))\n(defn a-fn [] :ok)\n")
+      (write-file! root "demo/b.clj"
+                   "(ns demo.b)\n(defn b-fn [] :ok)\n")
+      (let [default-result (tool/analyze-project
+                            {:source-paths [(.getPath root)]
+                             :component-rules [{:component :alpha :match "demo.a"}
+                                               {:component :beta :match "demo.b"}]})
+            wide-result (tool/analyze-project
+                         {:source-paths [(.getPath root)]
+                          :component-rules [{:component :alpha :match "demo.a"}
+                                            {:component :beta :match "demo.b"}]
+                          :healthy-threshold 0.5})]
+        (should= :pain (get-in (:component-stats default-result) [:beta :zone]))
+        (should= :healthy (get-in (:component-stats wide-result) [:alpha :zone]))
+        (should= :pain (get-in (:component-stats wide-result) [:beta :zone])))))
 
   (it "uses allowed-dependencies to flag edges not in the allowed map"
     (let [root (temp-dir)]
@@ -153,7 +175,7 @@
             by-component (into {} (map (juxt :component identity) (:component-rules cfg)))]
         (should= "empire.application*" (:match (get by-component :application)))
         (should= "empire.adapters*" (:match (get by-component :adapters)))
-        (should= "empire.acceptance*" (:match (get by-component :acceptance)))))
+        (should= "empire.acceptance*" (:match (get by-component :acceptance))))))
 
   (it "generates starter config allowed-dependencies from observed component edges"
     (let [root (temp-dir)]
@@ -182,7 +204,7 @@
       (let [cfg (#'tool/generate-starter-config [(.getPath root)])
             by-component (into {} (map (juxt :component identity) (:component-rules cfg)))]
         (should= "empire.api*" (:match (get by-component :api)))
-        (should= "empire.impl*" (:match (get by-component :impl))))))))
+        (should= "empire.impl*" (:match (get by-component :impl)))))))
 
 (describe "dependency-tool helper behavior"
   (it "matches patterns for keyword, exact string, glob, and regex"
@@ -234,6 +256,70 @@
       (should= 0 (:code help-output))
       (should (str/includes? (:text help-output) "Usage: clj -M:check-dependencies"))))
 
+  (it "classifies components into zones based on abstractness and instability"
+    (should= :pain (graph/classify-zone 0.0 0.0 0.3))
+    (should= :pain (graph/classify-zone 0.1 0.2 0.3))
+    (should= :useless (graph/classify-zone 1.0 1.0 0.3))
+    (should= :useless (graph/classify-zone 0.8 0.8 0.3))
+    (should= :healthy (graph/classify-zone 0.0 1.0 0.3))
+    (should= :healthy (graph/classify-zone 1.0 0.0 0.3))
+    (should= :healthy (graph/classify-zone 0.5 0.5 0.3)))
+
+  (it "classifies zones using a custom healthy-threshold"
+    (should= :healthy (graph/classify-zone 0.3 0.3 0.5))
+    (should= :pain (graph/classify-zone 0.3 0.3 0.1))
+    (should= :healthy (graph/classify-zone 0.8 0.8 0.7))
+    (should= :useless (graph/classify-zone 0.8 0.8 0.1)))
+
+  (it "colorizes zone labels with ANSI codes and intensity based on distance"
+    (let [deep-pain (report/colorize-zone :pain 1.0 0.3)
+          mild-pain (report/colorize-zone :pain 0.35 0.3)
+          deep-useless (report/colorize-zone :useless 1.0 0.3)
+          mild-useless (report/colorize-zone :useless 0.35 0.3)
+          healthy (report/colorize-zone :healthy 0.0 0.3)
+          mild-healthy (report/colorize-zone :healthy 0.25 0.3)]
+      (should (str/includes? deep-pain "pain"))
+      (should (str/includes? mild-pain "pain"))
+      (should (str/includes? deep-useless "useless"))
+      (should (str/includes? healthy "healthy"))
+      (should (str/includes? mild-healthy "healthy"))
+      (should (str/includes? deep-pain "\u001b["))
+      (should (str/includes? deep-useless "\u001b["))
+      (should (str/includes? healthy "\u001b["))))
+
+  (it "omits ANSI codes when color is disabled"
+    (let [report (with-out-str
+                   (report/report-text
+                    {:component-stats {:alpha {:fan-in 0
+                                               :fan-out 0
+                                               :instability 0.0
+                                               :abstractness 0.0
+                                               :distance 1.0
+                                               :zone :pain}}
+                     :component-edges []
+                     :warnings []
+                     :violations []
+                     :cycles []}
+                    {:color? false}))]
+      (should (str/includes? report "pain"))
+      (should-not (str/includes? report "\u001b["))))
+
+  (it "includes Zone column in text report"
+    (let [report (with-out-str
+                   (#'tool/report-text
+                    {:component-stats {:alpha {:fan-in 0
+                                               :fan-out 0
+                                               :instability 0.0
+                                               :abstractness 0.0
+                                               :distance 1.0
+                                               :zone :pain}}
+                     :component-edges []
+                     :warnings []
+                     :violations []
+                     :cycles []}))]
+      (should (str/includes? report "Zone"))
+      (should (str/includes? report "pain"))))
+
   (it "formats text report with warnings, violations, and cycles"
     (let [report (with-out-str
                    (#'tool/report-text
@@ -241,7 +327,8 @@
                                                :fan-out 2
                                                :instability 0.66
                                                :abstractness 0.10
-                                               :distance 0.24}}
+                                               :distance 0.24
+                                               :zone :pain}}
                      :component-edges [[:alpha :beta]]
                      :warnings [{:namespace "demo.a" :callee "requiring-resolve" :targets ["demo.b"]}]
                      :violations [{:from-component :alpha
@@ -249,10 +336,30 @@
                                    :from-ns "demo.a"
                                    :to-ns "demo.b"}]
                      :cycles [[:alpha :beta]]}))]
+      (should (str/includes? report "Component Dependencies"))
+      (should (str/includes? report ":alpha -> :beta"))
       (should (str/includes? report "Warnings: 1"))
       (should (str/includes? report "demo.a uses requiring-resolve -> demo.b"))
       (should (str/includes? report "Boundary Violations"))
-      (should (str/includes? report "Cycles")))))
+      (should (str/includes? report "Cycles"))))
+
+  (it "omits Component Dependencies when edges? is false"
+    (let [report (with-out-str
+                   (#'tool/report-text
+                    {:component-stats {:alpha {:fan-in 1
+                                               :fan-out 2
+                                               :instability 0.66
+                                               :abstractness 0.10
+                                               :distance 0.24
+                                               :zone :pain}}
+                     :component-edges [[:alpha :beta]]
+                     :warnings []
+                     :violations []
+                     :cycles []}
+                    {:edges? false}))]
+      (should-not (str/includes? report "Component Dependencies"))
+      (should-not (str/includes? report ":alpha -> :beta"))
+      (should (str/includes? report "Component Metrics")))))
 
 (describe "dependency-tool CLI flow"
   (it "parses args with defaults"
@@ -261,7 +368,17 @@
       (should= :text (:fmt defaults))
       (should= false (:help? defaults))
       (should= false (:init? defaults))
-      (should= false (:force-init? defaults))))
+      (should= false (:force-init? defaults))
+      (should= true (:color? defaults))
+      (should= true (:edges? defaults))))
+
+  (it "parses --no-color flag"
+    (let [parsed (#'tool/parse-args ["--no-color"])]
+      (should= false (:color? parsed))))
+
+  (it "parses --no-edges flag"
+    (let [parsed (#'tool/parse-args ["--no-edges"])]
+      (should= false (:edges? parsed))))
 
   (it "parses explicit config path and options"
     (let [parsed (#'tool/parse-args ["cfg.edn" "--format" "edn" "--init"])]
@@ -281,33 +398,37 @@
 
   (it "run-cli creates config for --init"
     (let [root (temp-dir)
-          cfg-path (.getPath (io/file root "dep.edn"))]
-      (with-redefs [tool/generate-starter-config (fn [] {:source-paths ["src"] :component-rules []})]
-        (should= 0 (#'tool/run-cli [cfg-path "--init"])))
+          cfg-path (.getPath (io/file root "dep.edn"))
+          result (with-redefs [tool/generate-starter-config (fn [] {:source-paths ["src"] :component-rules []})]
+                   (let [code (atom nil)]
+                     (with-out-str (reset! code (#'tool/run-cli [cfg-path "--init"])))
+                     @code))]
+      (should= 0 result)
       (should (.exists (io/file cfg-path)))))
 
   (it "run-cli --init does not overwrite existing config"
     (let [root (temp-dir)
           cfg-path (.getPath (io/file root "dep.edn"))]
       (with-redefs [tool/generate-starter-config (fn [] {:source-paths ["src"] :component-rules []})]
-        (should= 0 (#'tool/run-cli [cfg-path "--init"])))
+        (with-out-str (#'tool/run-cli [cfg-path "--init"])))
       (let [before (slurp cfg-path)]
-        (should= 0 (#'tool/run-cli [cfg-path "--init"]))
+        (with-out-str (#'tool/run-cli [cfg-path "--init"]))
         (should= before (slurp cfg-path)))))
 
   (it "run-cli overwrites existing config for --force-init"
     (let [root (temp-dir)
           cfg-path (.getPath (io/file root "dep.edn"))]
       (with-redefs [tool/generate-starter-config (fn [] {:source-paths ["src"] :component-rules []})]
-        (should= 0 (#'tool/run-cli [cfg-path "--init"])))
+        (with-out-str (#'tool/run-cli [cfg-path "--init"])))
       (with-redefs [tool/generate-starter-config (fn [] {:source-paths ["other"] :component-rules []})]
-        (should= 0 (#'tool/run-cli [cfg-path "--force-init"])))
+        (with-out-str (#'tool/run-cli [cfg-path "--force-init"])))
       (should (str/includes? (slurp cfg-path) "other"))))
 
   (it "run-cli returns usage error when --init and --force-init are both set"
     (let [root (temp-dir)
           cfg-path (.getPath (io/file root "dep.edn"))]
-      (should= 2 (#'tool/run-cli [cfg-path "--init" "--force-init"]))))
+      (binding [*err* (java.io.StringWriter.)]
+        (should= 2 (#'tool/run-cli [cfg-path "--init" "--force-init"])))))
 
   (it "run-cli returns 2 for unsupported format"
     (let [root (temp-dir)
@@ -321,7 +442,8 @@
                                             :component-edges []
                                             :warnings []})
                     tool/report-text (fn [& _] nil)]
-        (should= 2 (#'tool/run-cli [cfg-path "--format" "xml"])))))
+        (binding [*err* (java.io.StringWriter.)]
+          (should= 2 (#'tool/run-cli [cfg-path "--format" "xml"]))))))
 
   (it "run-cli returns 1 when analysis fails"
     (let [root (temp-dir)
@@ -369,16 +491,21 @@
 
   (it "run-cli returns 0 for --force-init when config does not yet exist"
     (let [root (temp-dir)
-          cfg-path (.getPath (io/file root "dep.edn"))]
-      (with-redefs [tool/generate-starter-config (fn [] {:source-paths ["src"]})]
-        (should= 0 (#'tool/run-cli [cfg-path "--force-init"])))))
+          cfg-path (.getPath (io/file root "dep.edn"))
+          result (with-redefs [tool/generate-starter-config (fn [] {:source-paths ["src"]})]
+                   (let [code (atom nil)]
+                     (with-out-str (reset! code (#'tool/run-cli [cfg-path "--force-init"])))
+                     @code))]
+      (should= 0 result)))
 
   (it "run-cli returns usage error for unknown top-level argument"
-    (should= 2 (#'tool/run-cli ["--bogus"])))
+    (binding [*err* (java.io.StringWriter.)]
+      (should= 2 (#'tool/run-cli ["--bogus"]))))
 
   (it "run-cli returns usage error for missing --format value"
     (should= :usage (:error (#'tool/parse-args ["--format"])))
-    (should= 2 (#'tool/run-cli ["--format"])))
+    (binding [*err* (java.io.StringWriter.)]
+      (should= 2 (#'tool/run-cli ["--format"]))))
 
   (it "run-cli prints help and exits 0 for --help"
     (let [out (java.io.StringWriter.)]
