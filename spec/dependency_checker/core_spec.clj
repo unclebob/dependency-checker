@@ -7,9 +7,10 @@
             [dependency-checker.core.base.dependencies :as dep-base]
             [dependency-checker.core.base.reader :as reader-base]
             [dependency-checker.core.base.stats :as stats-base]
-            [dependency-checker.core.graph :as graph]
-            [dependency-checker.core.infer :as infer]
-            [dependency-checker.core :as tool]))
+             [dependency-checker.core.graph :as graph]
+             [dependency-checker.core.infer :as infer]
+             [dependency-checker.core.report :as report]
+             [dependency-checker.core :as tool]))
 
 (defn- temp-dir []
   (.toFile (java.nio.file.Files/createTempDirectory "dependency-tool-spec" (make-array java.nio.file.attribute.FileAttribute 0))))
@@ -67,7 +68,28 @@
         (should (< (Math/abs (- 0.6666666666666666 (get-in stats [:alpha :distance]))) 1.0e-9))
         (should (< (Math/abs (- 0.5 (get-in stats [:beta :instability]))) 1.0e-9))
         (should (< (Math/abs (- 0.0 (get-in stats [:beta :abstractness]))) 1.0e-9))
-        (should (< (Math/abs (- 0.5 (get-in stats [:beta :distance]))) 1.0e-9)))))
+        (should (< (Math/abs (- 0.5 (get-in stats [:beta :distance]))) 1.0e-9))
+        (should= :useless (get-in stats [:alpha :zone]))
+        (should= :pain (get-in stats [:beta :zone])))))
+
+  (it "uses healthy-threshold from config for zone classification"
+    (let [root (temp-dir)]
+      (write-file! root "demo/a.clj"
+                   "(ns demo.a (:require [demo.b :as b]))\n(defn a-fn [] :ok)\n")
+      (write-file! root "demo/b.clj"
+                   "(ns demo.b)\n(defn b-fn [] :ok)\n")
+      (let [default-result (tool/analyze-project
+                            {:source-paths [(.getPath root)]
+                             :component-rules [{:component :alpha :match "demo.a"}
+                                               {:component :beta :match "demo.b"}]})
+            wide-result (tool/analyze-project
+                         {:source-paths [(.getPath root)]
+                          :component-rules [{:component :alpha :match "demo.a"}
+                                            {:component :beta :match "demo.b"}]
+                          :healthy-threshold 0.5})]
+        (should= :pain (get-in (:component-stats default-result) [:beta :zone]))
+        (should= :healthy (get-in (:component-stats wide-result) [:alpha :zone]))
+        (should= :pain (get-in (:component-stats wide-result) [:beta :zone])))))
 
   (it "uses allowed-dependencies to flag edges not in the allowed map"
     (let [root (temp-dir)]
@@ -234,6 +256,70 @@
       (should= 0 (:code help-output))
       (should (str/includes? (:text help-output) "Usage: clj -M:check-dependencies"))))
 
+  (it "classifies components into zones based on abstractness and instability"
+    (should= :pain (graph/classify-zone 0.0 0.0 0.1))
+    (should= :pain (graph/classify-zone 0.1 0.2 0.1))
+    (should= :useless (graph/classify-zone 1.0 1.0 0.1))
+    (should= :useless (graph/classify-zone 0.8 0.8 0.1))
+    (should= :healthy (graph/classify-zone 0.0 1.0 0.1))
+    (should= :healthy (graph/classify-zone 1.0 0.0 0.1))
+    (should= :healthy (graph/classify-zone 0.5 0.5 0.1)))
+
+  (it "classifies zones using a custom healthy-threshold"
+    (should= :healthy (graph/classify-zone 0.3 0.3 0.5))
+    (should= :pain (graph/classify-zone 0.3 0.3 0.1))
+    (should= :healthy (graph/classify-zone 0.8 0.8 0.7))
+    (should= :useless (graph/classify-zone 0.8 0.8 0.1)))
+
+  (it "colorizes zone labels with ANSI codes and intensity based on distance"
+    (let [deep-pain (report/colorize-zone :pain 1.0)
+          mild-pain (report/colorize-zone :pain 0.1)
+          deep-useless (report/colorize-zone :useless 1.0)
+          mild-useless (report/colorize-zone :useless 0.1)
+          healthy (report/colorize-zone :healthy 0.0)
+          mild-healthy (report/colorize-zone :healthy 0.2)]
+      (should (str/includes? deep-pain "pain"))
+      (should (str/includes? mild-pain "pain"))
+      (should (str/includes? deep-useless "useless"))
+      (should (str/includes? healthy "healthy"))
+      (should (str/includes? mild-healthy "healthy"))
+      (should (str/includes? deep-pain "\u001b["))
+      (should (str/includes? deep-useless "\u001b["))
+      (should (str/includes? healthy "\u001b["))))
+
+  (it "omits ANSI codes when color is disabled"
+    (let [report (with-out-str
+                   (report/report-text
+                    {:component-stats {:alpha {:fan-in 0
+                                               :fan-out 0
+                                               :instability 0.0
+                                               :abstractness 0.0
+                                               :distance 1.0
+                                               :zone :pain}}
+                     :component-edges []
+                     :warnings []
+                     :violations []
+                     :cycles []}
+                    {:color? false}))]
+      (should (str/includes? report "pain"))
+      (should-not (str/includes? report "\u001b["))))
+
+  (it "includes Zone column in text report"
+    (let [report (with-out-str
+                   (#'tool/report-text
+                    {:component-stats {:alpha {:fan-in 0
+                                               :fan-out 0
+                                               :instability 0.0
+                                               :abstractness 0.0
+                                               :distance 1.0
+                                               :zone :pain}}
+                     :component-edges []
+                     :warnings []
+                     :violations []
+                     :cycles []}))]
+      (should (str/includes? report "Zone"))
+      (should (str/includes? report "pain"))))
+
   (it "formats text report with warnings, violations, and cycles"
     (let [report (with-out-str
                    (#'tool/report-text
@@ -241,7 +327,8 @@
                                                :fan-out 2
                                                :instability 0.66
                                                :abstractness 0.10
-                                               :distance 0.24}}
+                                               :distance 0.24
+                                               :zone :pain}}
                      :component-edges [[:alpha :beta]]
                      :warnings [{:namespace "demo.a" :callee "requiring-resolve" :targets ["demo.b"]}]
                      :violations [{:from-component :alpha
@@ -261,7 +348,12 @@
       (should= :text (:fmt defaults))
       (should= false (:help? defaults))
       (should= false (:init? defaults))
-      (should= false (:force-init? defaults))))
+      (should= false (:force-init? defaults))
+      (should= true (:color? defaults))))
+
+  (it "parses --no-color flag"
+    (let [parsed (#'tool/parse-args ["--no-color"])]
+      (should= false (:color? parsed))))
 
   (it "parses explicit config path and options"
     (let [parsed (#'tool/parse-args ["cfg.edn" "--format" "edn" "--init"])]

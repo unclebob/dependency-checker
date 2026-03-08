@@ -76,8 +76,8 @@
   (if (failure? result) 1 0))
 
 (defn- text-output
-  [result]
-  (report-text result)
+  [result opts]
+  (report-text result opts)
   (if (failure? result) 1 0))
 
 (defn- unsupported-format-output
@@ -87,13 +87,12 @@
   2)
 
 (defn- run-analysis!
-  [{:keys [config-path fmt]}]
+  [{:keys [config-path fmt color?]}]
   (let [result (analyze-project (load-config config-path))
-        format-handler ({:edn edn-output
-                         :text text-output}
-                        fmt)]
-    (if format-handler
-      (format-handler result)
+        opts {:color? color?}]
+    (case fmt
+      :edn (edn-output result)
+      :text (text-output result opts)
       (unsupported-format-output fmt))))
 
 (defn- run-cli

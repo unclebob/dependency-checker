@@ -9,6 +9,7 @@
    :component-rules []
    :allowed-dependencies {}
    :allowed-exceptions []
+   :healthy-threshold 0.1
    :fail-on-cycles true
    :fail-on-violations true})
 

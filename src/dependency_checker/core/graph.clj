@@ -111,8 +111,16 @@
                      (zipmap component-set (repeat #{}))
                      component-edges)})
 
+(defn classify-zone
+  [abstractness instability threshold]
+  (let [sum (+ abstractness instability)]
+    (cond
+      (< sum (- 1.0 threshold)) :pain
+      (> sum (+ 1.0 threshold)) :useless
+      :else :healthy)))
+
 (defn component-stat
-  [component parsed incoming outgoing]
+  [component parsed incoming outgoing threshold]
   (let [ns-in-component (filter #(= component (:component %)) parsed)
         public-count (reduce + (map :public-count ns-in-component))
         abstract-count (reduce + (map :abstract-count ns-in-component))
@@ -127,14 +135,15 @@
      :instability instability
      :abstractness abstractness
      :distance distance
+     :zone (classify-zone abstractness instability threshold)
      :public-vars public-count
      :abstract-vars abstract-count}))
 
 (defn component-stats-map
-  [component-set parsed incoming outgoing]
+  [component-set parsed incoming outgoing threshold]
   (->> component-set
        (map (fn [component]
-              [component (component-stat component parsed incoming outgoing)]))
+              [component (component-stat component parsed incoming outgoing threshold)]))
        (sort-by (comp str first))
        (into {})))
 
@@ -180,7 +189,8 @@
                              (map (juxt :from-component :to-component))
                              set)
         {:keys [incoming outgoing]} (neighbor-maps component-set component-edges)
-        component-stats (component-stats-map component-set parsed incoming outgoing)
+        threshold (:healthy-threshold merged-config)
+        component-stats (component-stats-map component-set parsed incoming outgoing threshold)
         exceptions (mapv cfg/compile-exception (:allowed-exceptions merged-config))
         allowed-deps (:allowed-dependencies merged-config)
         forbidden-rules (mapv cfg/normalize-forbidden-rule (:forbidden-dependencies merged-config))

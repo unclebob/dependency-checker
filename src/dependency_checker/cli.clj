@@ -13,6 +13,7 @@
   {"--help" (fn [state more] {:state (assoc state :help? true) :remaining more})
    "--init" (fn [state more] {:state (assoc state :init? true) :remaining more})
    "--force-init" (fn [state more] {:state (assoc state :force-init? true) :remaining more})
+   "--no-color" (fn [state more] {:state (assoc state :color? false) :remaining more})
    "--format" apply-format-option})
 
 (defn apply-option
@@ -30,7 +31,8 @@
       :fmt :text
       :help? false
       :init? false
-      :force-init? false}
+      :force-init? false
+      :color? true}
      remaining]))
 
 (defn- parse-step

@@ -15,8 +15,6 @@ Add an alias to your `deps.edn`:
    :main-opts ["-m" "dependency-checker.core"]}}}
 ```
 
-### Babashka
-
 Add a task to your `bb.edn`:
 
 ```clojure
@@ -33,9 +31,10 @@ Then run with `bb check-dependencies` (same arguments as below).
     clj -M:check-dependencies
     clj -M:check-dependencies dependency-checker.edn
     clj -M:check-dependencies dependency-checker.edn --format edn
+    clj -M:check-dependencies --no-color
     clj -M:check-dependencies --help
 
-Use `--help` to print a usage summary to stdout.
+Use `--help` to print a usage summary to stdout. Use `--no-color` to disable ANSI color output.
 
 Create or recreate starter config:
 
@@ -110,6 +109,21 @@ Specific namespace-level edges can be exempted from violation reporting:
                        :to-ns "sample.computer.production"}]}
 ```
 
+### Healthy Threshold
+
+Controls how far from the main sequence a component can be before it is classified into the Zone of Pain or Zone of Uselessness.
+
+```clojure
+{:healthy-threshold 0.1}    ; default
+```
+
+A component is classified as:
+- **healthy** when `A + I` is within the threshold of 1.0 (i.e., between `1 - threshold` and `1 + threshold`)
+- **pain** when `A + I < 1 - threshold` (concrete and stable — hard to change)
+- **useless** when `A + I > 1 + threshold` (abstract and unstable — dead abstractions)
+
+Increase the threshold to be more lenient; decrease it to be stricter.
+
 ### Failure Flags
 
 ```clojure
@@ -119,7 +133,7 @@ Specific namespace-level edges can be exempted from violation reporting:
 
 ## Metrics
 
-Reports per-component: fan-in, fan-out, instability, abstractness, and distance from the main sequence.
+Reports per-component: fan-in, fan-out, instability, abstractness, distance from the main sequence, and zone classification. Zone labels are colorized in terminal output (red for pain, blue for useless, green for healthy), with intensity proportional to distance.
 
 Fan-in/fan-out edges are derived from:
 - `ns :require`, `ns :use`, `ns :import`
@@ -168,7 +182,7 @@ Run from `sample-app/`:
 
 ## Example Output
 
-```text
+```sh
 Dependency Analysis
 ===================
 
@@ -180,11 +194,15 @@ Cycles: 0
 
 Component Metrics
 -----------------
-Component           FanIn  FanOut Instability    Abstract  Distance
-:cli                    0       1       1.000       0.000     0.000
-:core                   1       0       0.000       0.000     1.000
+Component           FanIn  FanOut Instability    Abstract  Distance  Zone
+:cli                    0       1       1.000       0.000     0.000  healthy
+:core                   1       0       0.000       0.000     1.000  pain
 
 Component Dependencies
 ----------------------
 :cli -> :core
 ```
+
+Zone labels are colorized in terminal output. Use `--no-color` for plain text.
+
+
