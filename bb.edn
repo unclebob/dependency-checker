@@ -2,4 +2,18 @@
  :deps {}
  :tasks {check-dependencies {:doc "Run dependency checker"
                              :requires ([dependency-checker.core :as dc])
-                             :task (apply dc/-main *command-line-args*)}}}
+                             :task (apply dc/-main *command-line-args*)}
+         spec {:doc "Run specs"
+               :extra-deps {speclj/speclj {:mvn/version "3.12.1"}}
+               :extra-paths ["spec"]
+               :requires ([speclj.main])
+               :task (speclj.main/-main "-c")}
+         mutate {:doc "Run mutation testing"
+                 :extra-deps {clj-mutate/clj-mutate
+                              {:git/url "https://github.com/unclebob/clj-mutate.git"
+                               :git/sha "223da6c1a814265d0a714417def997ce7878a8da"}
+                              org.clojure/tools.reader {:mvn/version "1.4.2"}
+                              speclj/speclj {:mvn/version "3.12.1"}}
+                 :extra-paths ["spec"]
+                 :requires ([clj-mutate.core])
+                 :task (clj-mutate.core/-main)}}}
