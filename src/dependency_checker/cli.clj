@@ -14,6 +14,7 @@
    "--init" (fn [state more] {:state (assoc state :init? true) :remaining more})
    "--force-init" (fn [state more] {:state (assoc state :force-init? true) :remaining more})
    "--no-color" (fn [state more] {:state (assoc state :color? false) :remaining more})
+   "--no-edges" (fn [state more] {:state (assoc state :edges? false) :remaining more})
    "--format" apply-format-option})
 
 (defn apply-option
@@ -32,7 +33,8 @@
       :help? false
       :init? false
       :force-init? false
-      :color? true}
+      :color? true
+      :edges? true}
      remaining]))
 
 (defn- parse-step

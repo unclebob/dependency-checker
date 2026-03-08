@@ -87,9 +87,9 @@
   2)
 
 (defn- run-analysis!
-  [{:keys [config-path fmt color?]}]
+  [{:keys [config-path fmt color? edges?]}]
   (let [result (analyze-project (load-config config-path))
-        opts {:color? color?}]
+        opts {:color? color? :edges? edges?}]
     (case fmt
       :edn (edn-output result)
       :text (text-output result opts)

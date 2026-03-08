@@ -175,8 +175,7 @@
             by-component (into {} (map (juxt :component identity) (:component-rules cfg)))]
         (should= "empire.application*" (:match (get by-component :application)))
         (should= "empire.adapters*" (:match (get by-component :adapters)))
-        (should= "empire.acceptance*" (:match (get by-component :acceptance)))))
-
+        (should= "empire.acceptance*" (:match (get by-component :acceptance))))))
 
   (it "generates starter config allowed-dependencies from observed component edges"
     (let [root (temp-dir)]
@@ -205,7 +204,7 @@
       (let [cfg (#'tool/generate-starter-config [(.getPath root)])
             by-component (into {} (map (juxt :component identity) (:component-rules cfg)))]
         (should= "empire.api*" (:match (get by-component :api)))
-        (should= "empire.impl*" (:match (get by-component :impl))))))))
+        (should= "empire.impl*" (:match (get by-component :impl)))))))
 
 (describe "dependency-tool helper behavior"
   (it "matches patterns for keyword, exact string, glob, and regex"
@@ -258,13 +257,13 @@
       (should (str/includes? (:text help-output) "Usage: clj -M:check-dependencies"))))
 
   (it "classifies components into zones based on abstractness and instability"
-    (should= :pain (graph/classify-zone 0.0 0.0 0.1))
-    (should= :pain (graph/classify-zone 0.1 0.2 0.1))
-    (should= :useless (graph/classify-zone 1.0 1.0 0.1))
-    (should= :useless (graph/classify-zone 0.8 0.8 0.1))
-    (should= :healthy (graph/classify-zone 0.0 1.0 0.1))
-    (should= :healthy (graph/classify-zone 1.0 0.0 0.1))
-    (should= :healthy (graph/classify-zone 0.5 0.5 0.1)))
+    (should= :pain (graph/classify-zone 0.0 0.0 0.3))
+    (should= :pain (graph/classify-zone 0.1 0.2 0.3))
+    (should= :useless (graph/classify-zone 1.0 1.0 0.3))
+    (should= :useless (graph/classify-zone 0.8 0.8 0.3))
+    (should= :healthy (graph/classify-zone 0.0 1.0 0.3))
+    (should= :healthy (graph/classify-zone 1.0 0.0 0.3))
+    (should= :healthy (graph/classify-zone 0.5 0.5 0.3)))
 
   (it "classifies zones using a custom healthy-threshold"
     (should= :healthy (graph/classify-zone 0.3 0.3 0.5))
@@ -273,12 +272,12 @@
     (should= :useless (graph/classify-zone 0.8 0.8 0.1)))
 
   (it "colorizes zone labels with ANSI codes and intensity based on distance"
-    (let [deep-pain (report/colorize-zone :pain 1.0)
-          mild-pain (report/colorize-zone :pain 0.1)
-          deep-useless (report/colorize-zone :useless 1.0)
-          mild-useless (report/colorize-zone :useless 0.1)
-          healthy (report/colorize-zone :healthy 0.0)
-          mild-healthy (report/colorize-zone :healthy 0.2)]
+    (let [deep-pain (report/colorize-zone :pain 1.0 0.3)
+          mild-pain (report/colorize-zone :pain 0.35 0.3)
+          deep-useless (report/colorize-zone :useless 1.0 0.3)
+          mild-useless (report/colorize-zone :useless 0.35 0.3)
+          healthy (report/colorize-zone :healthy 0.0 0.3)
+          mild-healthy (report/colorize-zone :healthy 0.25 0.3)]
       (should (str/includes? deep-pain "pain"))
       (should (str/includes? mild-pain "pain"))
       (should (str/includes? deep-useless "useless"))
@@ -337,10 +336,30 @@
                                    :from-ns "demo.a"
                                    :to-ns "demo.b"}]
                      :cycles [[:alpha :beta]]}))]
+      (should (str/includes? report "Component Dependencies"))
+      (should (str/includes? report ":alpha -> :beta"))
       (should (str/includes? report "Warnings: 1"))
       (should (str/includes? report "demo.a uses requiring-resolve -> demo.b"))
       (should (str/includes? report "Boundary Violations"))
-      (should (str/includes? report "Cycles")))))
+      (should (str/includes? report "Cycles"))))
+
+  (it "omits Component Dependencies when edges? is false"
+    (let [report (with-out-str
+                   (#'tool/report-text
+                    {:component-stats {:alpha {:fan-in 1
+                                               :fan-out 2
+                                               :instability 0.66
+                                               :abstractness 0.10
+                                               :distance 0.24
+                                               :zone :pain}}
+                     :component-edges [[:alpha :beta]]
+                     :warnings []
+                     :violations []
+                     :cycles []}
+                    {:edges? false}))]
+      (should-not (str/includes? report "Component Dependencies"))
+      (should-not (str/includes? report ":alpha -> :beta"))
+      (should (str/includes? report "Component Metrics")))))
 
 (describe "dependency-tool CLI flow"
   (it "parses args with defaults"
@@ -350,11 +369,16 @@
       (should= false (:help? defaults))
       (should= false (:init? defaults))
       (should= false (:force-init? defaults))
-      (should= true (:color? defaults))))
+      (should= true (:color? defaults))
+      (should= true (:edges? defaults))))
 
   (it "parses --no-color flag"
     (let [parsed (#'tool/parse-args ["--no-color"])]
       (should= false (:color? parsed))))
+
+  (it "parses --no-edges flag"
+    (let [parsed (#'tool/parse-args ["--no-edges"])]
+      (should= false (:edges? parsed))))
 
   (it "parses explicit config path and options"
     (let [parsed (#'tool/parse-args ["cfg.edn" "--format" "edn" "--init"])]

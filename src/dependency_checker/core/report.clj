@@ -16,8 +16,11 @@
   (format "\u001b[38;2;%d;%d;%dm" r g b))
 
 (defn colorize-zone
-  [z distance]
-  (let [intensity (min 1.0 (double distance))
+  [z distance threshold]
+  (let [intensity (case z
+                    (:pain :useless) (min 1.0 (/ (max 0.0 (- (double distance) threshold))
+                                                 (- 1.0 threshold)))
+                    :healthy (min 1.0 (- 1.0 (/ (double distance) threshold))))
         label (name z)
         color (case z
                 :pain (let [r (int (+ 140 (* 115 intensity)))
@@ -44,13 +47,13 @@
       (println line))))
 
 (defn- format-zone
-  [z distance color?]
+  [z distance threshold color?]
   (if color?
-    (colorize-zone z distance)
+    (colorize-zone z distance threshold)
     (name z)))
 
 (defn metric-lines
-  [component-stats {:keys [color?] :or {color? true}}]
+  [component-stats {:keys [color? threshold] :or {color? true threshold 0.3}}]
   (cons
    (format "%-18s %6s %7s %11s %11s %9s  %s" "Component" "FanIn" "FanOut" "Instability" "Abstract" "Distance" "Zone")
    (for [[component {:keys [fan-in fan-out instability abstractness distance zone]}] component-stats]
@@ -61,7 +64,7 @@
              (fmt-double instability)
              (fmt-double abstractness)
              (fmt-double distance)
-             (format-zone zone distance color?)))))
+             (format-zone zone distance threshold color?)))))
 
 (defn edge-lines
   [component-edges]
@@ -91,9 +94,10 @@
 
 (defn report-text
   ([result] (report-text result {}))
-  ([{:keys [component-stats component-edges warnings violations cycles]} opts]
+  ([{:keys [config component-stats component-edges warnings violations cycles]} opts]
    (let [components (keys component-stats)
-         opts (merge {:color? true} opts)]
+         threshold (or (:healthy-threshold config) 0.3)
+         opts (merge {:color? true :edges? true :threshold threshold} opts)]
      (println "Dependency Analysis")
      (println "===================")
      (println)
@@ -103,7 +107,8 @@
      (println (format "Violations: %d" (count violations)))
      (println (format "Cycles: %d" (count cycles)))
      (print-labeled-section "Component Metrics" "-----------------" (metric-lines component-stats opts))
-     (print-labeled-section "Component Dependencies" "----------------------" (edge-lines component-edges))
+     (when (:edges? opts)
+       (print-labeled-section "Component Dependencies" "----------------------" (edge-lines component-edges)))
      (print-labeled-section "Warnings" "--------" (warning-lines warnings))
      (print-labeled-section "Boundary Violations" "-------------------" (violation-lines violations))
      (print-labeled-section "Cycles" "------" (cycle-lines cycles)))))
@@ -115,7 +120,7 @@
     {}))
 
 (def usage-summary
-  "Usage: clj -M:check-dependencies [config.edn] [--format text|edn] [--no-color] [--init|--force-init] [--help]")
+  "Usage: clj -M:check-dependencies [config.edn] [--format text|edn] [--no-color] [--no-edges] [--init|--force-init] [--help]")
 
 (defn help!
   []
