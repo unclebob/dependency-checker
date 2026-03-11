@@ -1,200 +1,133 @@
-;; mutation-tested: 2026-03-07
+;; mutation-tested: 2026-03-11
 (ns dependency-checker.core.infer
   (:require [clojure.pprint]
-            [clojure.string :as str]
             [dependency-checker.core.base.config :as cfg]
             [dependency-checker.core.base.dependencies :as deps]
             [dependency-checker.core.base.reader :as reader]
             [dependency-checker.core.base.stats :as stats]))
 
+(defn- first-ns-decl
+  [forms]
+  (first (filter reader/ns-form? forms)))
+
+(defn- record-requires
+  [forms ns-decl]
+  (set (map str (deps/extract-dependencies forms ns-decl))))
+
+(defn- record-counts
+  [forms]
+  (select-keys (stats/var-stats forms) [:public-count :abstract-count]))
+
+(defn- ns-decl->record
+  [forms ns-decl]
+  (merge {:namespace (str (second ns-decl))
+          :requires (record-requires forms ns-decl)}
+         (record-counts forms)))
+
+(defn- source-ns-record
+  [forms]
+  (when-let [ns-decl (first-ns-decl forms)]
+    (ns-decl->record forms ns-decl)))
+
 (defn source-ns-records
-  [source-paths include-exts]
-  (->> (cfg/source-files source-paths include-exts)
-       (map (fn [f]
-              (let [forms (reader/read-forms f)
-                    ns-decl (first (filter reader/ns-form? forms))]
-                (when ns-decl
-                  (let [ns-name (second ns-decl)
-                        var-stats (stats/var-stats forms)]
-                    {:namespace (str ns-name)
-                     :requires (set (map str (deps/extract-dependencies forms ns-decl)))
-                     :public-count (:public-count var-stats)
-                     :abstract-count (:abstract-count var-stats)})))))
+  [source-path include-exts]
+  (->> (cfg/source-files [source-path] include-exts)
+       (map (comp source-ns-record reader/read-forms))
        (filter some?)
        vec))
 
-(defn ns-prefixes
-  [ns-name]
-  (let [parts (str/split ns-name #"\.")]
-    (map #(str/join "." (take % parts))
-         (range 1 (inc (count parts))))))
-
-(defn parent-prefix
-  [prefix]
-  (let [parts (str/split prefix #"\.")]
-    (when (> (count parts) 1)
-      (str/join "." (butlast parts)))))
-
-(defn in-prefix?
-  [prefix ns-name]
-  (or (= prefix ns-name)
-      (str/starts-with? ns-name (str prefix "."))))
-
-(defn module-abstract?
-  [{:keys [public-count abstract-count]}]
-  (and (pos? public-count) (= public-count abstract-count)))
-
-(defn infer-abstract-prefixes
+(defn- project-roots
   [records]
-  (let [module-abstract (into {} (map (juxt :namespace module-abstract?) records))
-        all-ns (set (keys module-abstract))
-        prefixes (->> all-ns (mapcat ns-prefixes) set)
-        prefix-abstract? (fn [prefix]
-                           (let [desc (filter #(in-prefix? prefix %) all-ns)]
-                             (and (seq desc)
-                                  (every? #(true? (get module-abstract %)) desc))))
-        abstract-prefixes (set (filter prefix-abstract? prefixes))]
-    (->> abstract-prefixes
-         (filter (fn [prefix]
-                   (let [p (parent-prefix prefix)]
-                     (or (nil? p) (not (contains? abstract-prefixes p))))))
-         set)))
+  (->> records
+       (map :namespace)
+       (map cfg/namespace-root)
+       set))
 
-(defn best-abstract-prefix
-  [abstract-prefixes ns-name]
-  (->> abstract-prefixes
-       (filter #(in-prefix? % ns-name))
-       (sort-by count >)
-       first))
+(defn- namespace->component-map
+  [project-roots records]
+  (into {}
+        (map (fn [{:keys [namespace]}]
+               [namespace (cfg/namespace-component project-roots namespace)]))
+        records))
 
-(defn infer-concrete-prefixes
-  [records abstract-prefixes]
-  (let [all-ns (set (map :namespace records))
-        deps-by-ns (into {} (map (juxt :namespace :requires) records))
-        module-abstract (into {} (map (juxt :namespace module-abstract?) records))
-        abs-for-dep (fn [dep] (best-abstract-prefix abstract-prefixes dep))
-        candidate-target (fn [ns-name]
-                           (when-not (get module-abstract ns-name)
-                             (let [dep-namespaces (filter all-ns (get deps-by-ns ns-name))
-                                   abs-deps (set (keep abs-for-dep dep-namespaces))]
-                               (when (= 1 (count abs-deps))
-                                 (first abs-deps)))))
-        candidates-by-abs (reduce (fn [acc ns-name]
-                                    (if-let [target (candidate-target ns-name)]
-                                      (update acc target (fnil conj #{}) ns-name)
-                                      acc))
-                                  {}
-                                  all-ns)
-        qualified-prefixes (fn [target nss]
-                             (let [prefixes (->> nss (mapcat ns-prefixes) set)
-                                   qualifies? (fn [prefix]
-                                                (let [desc (filter #(in-prefix? prefix %) all-ns)
-                                                      desc-candidates (filter nss desc)]
-                                                  (and (seq desc)
-                                                       (= (set desc) (set desc-candidates))
-                                                       (every?
-                                                        (fn [ns-name]
-                                                          (let [dep-namespaces (filter all-ns (get deps-by-ns ns-name))]
-                                                            (every? #(in-prefix? target %) dep-namespaces)))
-                                                        desc))))]
-                               (->> prefixes
-                                    (filter qualifies?)
-                                    (remove #(= % target))
-                                    set)))]
-    (->> candidates-by-abs
-         (mapcat (fn [[target nss]]
-                   (let [prefixes (qualified-prefixes target nss)]
-                     (->> prefixes
-                          (filter (fn [prefix]
-                                    (let [p (parent-prefix prefix)]
-                                      (or (nil? p) (not (contains? prefixes p))))))
-                          vec))))
-         set)))
+(defn- components
+  [project-roots records]
+  (->> records
+       (map :namespace)
+       (map #(cfg/namespace-component project-roots %))
+       (filter some?)
+       set
+       (sort-by str)))
 
-(defn prefix->component
-  [root prefix]
-  (let [suffix (if (str/starts-with? prefix (str root "."))
-                 (subs prefix (inc (count root)))
-                 prefix)]
-    (keyword (str/replace suffix "." "-"))))
+(defn- dependency-component
+  [project-roots ns->component dep]
+  ((some-fn #(get ns->component %)
+            #(cfg/namespace-component project-roots %))
+   dep))
 
-(defn prefix->rule
-  [root prefix]
-  {:component (prefix->component root prefix)
-   :match (if (re-find #"\." prefix)
-            (str prefix "*")
-            (str prefix ".*"))})
+(defn- add-component-dependency
+  [acc from-component to-component]
+  (if (or (nil? to-component)
+          (= from-component to-component))
+    acc
+    (update acc from-component conj to-component)))
 
-(defn fallback-prefixes
-  [root nss covered]
-  (let [remaining (remove covered nss)]
-    (->> remaining
-         (keep (fn [ns-name]
-                 (let [parts (str/split ns-name #"\.")
-                       seg1 (second parts)]
-                   (when seg1 (str root "." seg1)))))
-         set)))
+(defn- dependency-components
+  [project-roots ns->component requires]
+  (map #(dependency-component project-roots ns->component %) requires))
+
+(defn- record-component-deps
+  [project-roots ns->component acc {:keys [namespace requires]}]
+  (if-let [from-component (get ns->component namespace)]
+    (reduce (fn [acc to-component]
+              (add-component-dependency acc from-component to-component))
+            acc
+            (dependency-components project-roots ns->component requires))
+    acc))
+
+(defn- sorted-dependency-map
+  [components deps-by-component]
+  (into {}
+        (for [component components]
+          [component (->> (get deps-by-component component #{})
+                          (sort-by str)
+                          vec)])))
 
 (defn infer-allowed-deps
-  [records rules]
-  (let [compiled-rules (cfg/compile-component-rules rules)
-        ns->component (into {} (map (fn [{:keys [namespace]}]
-                                      [namespace (cfg/component-for-ns compiled-rules namespace)])
-                                    records))
-        components (map :component rules)
-        initial (zipmap components (repeat #{}))
-        deps-by-component (reduce
-                           (fn [acc {:keys [namespace requires]}]
-                             (if-let [from-component (get ns->component namespace)]
-                               (reduce (fn [acc dep]
-                                         (if-let [to-component (or (get ns->component dep)
-                                                                   (cfg/component-for-ns compiled-rules dep))]
-                                           (if (= from-component to-component)
-                                             acc
-                                             (update acc from-component conj to-component))
-                                           acc))
-                                       acc
-                                       requires)
-                               acc))
-                           initial
-                           records)]
-    (into {}
-          (for [component (sort-by str components)]
-            [component (->> (get deps-by-component component #{})
-                            (sort-by str)
-                            vec)]))))
+  ([records]
+   (infer-allowed-deps records #{}))
+  ([records ignored-components]
+  (let [roots (project-roots records)
+        ns->component (namespace->component-map roots records)
+        known-components (->> (components roots records)
+                              (remove #(contains? ignored-components %))
+                              vec)
+        initial (zipmap known-components (repeat #{}))
+        deps-by-component (reduce (partial record-component-deps roots ns->component)
+                                  initial
+                                  records)]
+    (sorted-dependency-map known-components
+                           (into {}
+                                 (map (fn [[component deps]]
+                                        [component (remove #(contains? ignored-components %) deps)]))
+                                 deps-by-component)))))
+
+(defn- starter-config
+  [allowed-dependencies ignored-components]
+  (cond-> {:allowed-dependencies allowed-dependencies
+           :fail-on-cycles true
+           :fail-on-violations true}
+    (seq ignored-components) (assoc :ignored-components (vec (sort-by str ignored-components)))))
 
 (defn generate-starter-config
   ([]
-   (generate-starter-config (:source-paths cfg/default-config)))
-  ([source-paths]
-   (let [records (source-ns-records source-paths (:include-exts cfg/default-config))
-         nss (set (map :namespace records))
-         roots (->> nss (map #(first (str/split % #"\."))) frequencies)
-         root (or (first (first (sort-by (comp - val) roots))) "app")
-         abstract-prefixes (infer-abstract-prefixes records)
-         concrete-prefixes (infer-concrete-prefixes records abstract-prefixes)
-         covered (fn [ns-name]
-                   (or (some #(in-prefix? % ns-name) abstract-prefixes)
-                       (some #(in-prefix? % ns-name) concrete-prefixes)))
-         fallback (fallback-prefixes root nss covered)
-         prefixes (->> (concat abstract-prefixes concrete-prefixes fallback)
-                       set)
-         rules (->> prefixes
-                    (sort-by count >)
-                    (map #(prefix->rule root %))
-                    (reduce (fn [acc {:keys [component] :as rule}]
-                              (if (contains? acc component)
-                                acc
-                                (assoc acc component rule)))
-                            {})
-                    vals
-                    vec)]
-     {:source-paths (vec source-paths)
-      :component-rules rules
-      :allowed-dependencies (infer-allowed-deps records rules)
-      :fail-on-cycles true
-      :fail-on-violations true})))
+   (generate-starter-config "src" #{}))
+  ([source-path]
+   (generate-starter-config source-path #{}))
+  ([source-path ignored-components]
+   (let [records (source-ns-records source-path (:include-exts cfg/default-config))]
+     (starter-config (infer-allowed-deps records ignored-components)
+                     ignored-components))))
 
 (defn write-config!
   [path cfg]

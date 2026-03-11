@@ -6,6 +6,7 @@ Analyzes component boundaries and architecture health for this project.
 
     clj -M:check-dependencies
     clj -M:check-dependencies dependency-checker.edn
+    clj -M:check-dependencies dependency-checker.edn --source-path src
     clj -M:check-dependencies dependency-checker.edn --format edn
     clj -M:check-dependencies --help
 
@@ -14,32 +15,35 @@ Use `--help` to print a usage summary to stdout.
 Create or recreate starter config:
 
     clj -M:check-dependencies dependency-checker.edn --init
-    clj -M:check-dependencies dependency-checker.edn --force-init
+    clj -M:check-dependencies dependency-checker.edn --source-path src --force-init
 
 ## Working Directory Behavior
 
 The checker resolves paths from the directory where you run `clj` (the current working directory).
 
 - Default config path `dependency-checker.edn` is resolved relative to the current working directory.
-- `:source-paths` entries are also resolved relative to the current working directory unless you use absolute paths.
+- Default source path is `src`, resolved relative to the current working directory unless you use an absolute path.
 
 ## Config File
 
 Default config path is `dependency-checker.edn`.
 
-### Component Rules
+### Component Discovery
 
-Each rule maps a component name to a namespace regex pattern:
+Components are not configured manually.
 
-```clojure
-{:component-rules
- [{:component :ui
-   :match "^sample\\.ui(\\..*)?$"}
-  {:component :game
-   :match "^sample\\.game(\\..*)?$"}]}
+The checker derives the component from the second namespace segment under the chosen source path:
+
+```text
+<source-path>/project_ns/component_ns/...
 ```
 
-Rules are matched in order — the first matching rule wins. A catch-all rule (e.g., `"sample.*"`) can be placed last.
+Examples:
+
+- `src/sample_app/ui/view.clj` with namespace `sample-app.ui.view` belongs to component `:ui`
+- `src/sample_app/game/rules.clj` with namespace `sample-app.game.rules` belongs to component `:game`
+
+All dependencies from descendant namespaces roll up to their component. For example, every dependency from `sample-app.ui.*` contributes to component `:ui`.
 
 ### Allowed Dependencies
 
@@ -58,6 +62,16 @@ The `:allowed-dependencies` map declares which components each component may dep
 Use `:all` to allow a component to depend on anything (useful for test infrastructure).
 
 Self-dependencies (a component depending on itself) are always allowed.
+
+### Ignored Components
+
+Use `:ignored-components` to exclude components completely from analysis. Ignored components do not appear in metrics, edges, violations, warnings, or cycles.
+
+```clojure
+{:ignored-components [:spec-runner]}
+```
+
+This is useful for support components that you do not want treated as part of the architectural policy surface.
 
 ### Forbidden Dependencies
 
@@ -84,6 +98,8 @@ Specific namespace-level edges can be exempted from violation reporting:
                        :to-ns "sample.computer.production"}]}
 ```
 
+Namespace exceptions are exact namespace names.
+
 ### Failure Flags
 
 ```clojure
@@ -108,10 +124,13 @@ A symbol counts as abstract only when it represents real indirection (`defprotoc
 
 ## Starter Config
 
-`--init` infers components from namespace structure:
-- Abstract components from subtrees containing only `defprotocol`/`defmulti` modules.
-- Concrete components from implementing subtrees.
-- Seeds `:allowed-dependencies` from observed component-to-component dependencies.
+`--init` and `--force-init` infer `:allowed-dependencies` from observed component-to-component dependencies under the chosen source path.
+
+Generated config includes the inferred `:allowed-dependencies` plus `:fail-on-cycles true` and `:fail-on-violations true`.
+
+If you want to exclude support components such as `:spec-runner`, add `:ignored-components` manually after generation.
+
+If an existing config uses legacy keys such as `:source-paths` or `:component-rules`, the checker exits with an error and recommends regenerating the file with `--force-init`.
 
 ## Example Project
 
@@ -127,11 +146,9 @@ sample-app/
 
 ```clojure
 ;; sample-app/dependency-checker.edn
-{:source-paths ["src"]
- :component-rules [{:component :core :match "sample-app.core*"}
-                   {:component :cli :match "sample-app.cli*"}]
- :allowed-dependencies {:core []
-                        :cli [:core]}
+{:allowed-dependencies {:cli [:core]
+                        :core []}
+ :ignored-components [:spec-runner]
  :fail-on-cycles true
  :fail-on-violations true}
 ```
@@ -162,3 +179,36 @@ Component Dependencies
 ----------------------
 :cli -> :core
 ```
+
+## Mutation Workflow
+
+Run mutation testing one file at a time.
+
+Before running specs, run the Speclj structure check. The `:spec` alias already does this for you.
+
+Structure checker: `github.com/unclebob/speclj-structure-check`
+
+```bash
+clj -M:spec
+```
+
+Then mutate exactly one source file with `--max-workers 3`:
+
+```bash
+clj -M:mutate src/dependency_checker/core.clj --max-workers 3
+```
+
+Workflow rules:
+
+- Mutate only one file at a time.
+- Before moving to the next file, cover every uncovered mutation in the current file.
+- Before moving to the next file, kill every surviving mutation in the current file.
+- `clj-mutate` uses LCOV coverage data and regenerates it when stale.
+
+Recommended loop for each file:
+
+1. Run `clj -M:mutate path/to/file.clj --max-workers 3`.
+2. If any mutations are uncovered, add or fix specs until they are covered.
+3. If any mutations survive, change code or specs until they are killed.
+4. Rerun the same single-file mutation command.
+5. Only start the next file when the current file has no uncovered mutations and no survivors.

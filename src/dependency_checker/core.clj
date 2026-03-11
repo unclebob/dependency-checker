@@ -1,4 +1,4 @@
-;; mutation-tested: 2026-03-07
+;; mutation-tested: 2026-03-11
 (ns dependency-checker.core
   (:require [clojure.java.io :as io]
             [dependency-checker.cli :as cli]
@@ -13,18 +13,12 @@
 (def generate-starter-config infer/generate-starter-config)
 
 ;; Test-visible helper aliases
-(def pattern->matcher cfg/pattern->matcher)
-(def normalize-component-rule cfg/normalize-component-rule)
-(def match-patterns cfg/match-patterns)
-(def compile-normalized-rule cfg/compile-normalized-rule)
 (def compile-exception cfg/compile-exception)
 (def exception-matches? cfg/exception-matches?)
+(def namespace-component cfg/namespace-component)
+(def validate-config! cfg/validate-config!)
 (def ns-target deps/ns-target)
 (def dynamic-lookup-targets deps/dynamic-lookup-targets)
-(def infer-abstract-prefixes infer/infer-abstract-prefixes)
-(def infer-concrete-prefixes infer/infer-concrete-prefixes)
-(def parent-prefix infer/parent-prefix)
-(def best-abstract-prefix infer/best-abstract-prefix)
 (def strongly-connected-components graph/strongly-connected-components)
 (def write-config! infer/write-config!)
 (def load-config report/load-config)
@@ -42,33 +36,37 @@
     :else :analyze))
 
 (defn- create-config!
-  [config-path reason]
-  (write-config! config-path (generate-starter-config))
+  [config-path source-path reason]
+  (write-config! config-path (generate-starter-config source-path))
   (println (format "%s starter dependency config at %s" reason config-path))
-  (println "Review the generated component rules and boundary restrictions, then rerun.")
+  (println (format "Review the inferred allowed dependencies for namespaces under %s, then rerun." source-path))
   0)
 
 (defn- apply-config-action!
-  [action config-path]
+  [action config-path source-path]
   (case action
-    :recreate (create-config! config-path "Recreated")
-    :create (create-config! config-path "Created")
+    :recreate (create-config! config-path source-path "Recreated")
+    :create (create-config! config-path source-path "Created")
     :noop-init (do
                  (println (format "Config already exists at %s (not overwritten)." config-path))
                  0)
     nil))
 
 (defn- ensure-config!
-  [{:keys [config-path init? force-init?]}]
+  [{:keys [config-path source-path init? force-init?]}]
   (let [exists? (.exists (io/file config-path))]
     (if (and init? force-init?)
       (usage!)
-      (apply-config-action! (config-action exists? init? force-init?) config-path))))
+      (apply-config-action! (config-action exists? init? force-init?) config-path source-path))))
 
 (defn- failure?
   [result]
-  (or (and (seq (:violations result)) (get-in result [:config :fail-on-violations] true))
-      (and (seq (:cycles result)) (get-in result [:config :fail-on-cycles] true))))
+  (let [violations? (seq (:violations result))
+        cycles? (seq (:cycles result))
+        fail-on-violations? (get-in result [:config :fail-on-violations] true)
+        fail-on-cycles? (get-in result [:config :fail-on-cycles] true)]
+    (or (and violations? fail-on-violations?)
+        (and cycles? fail-on-cycles?))))
 
 (defn- edn-output
   [result]
@@ -86,15 +84,50 @@
     (println "Unsupported format:" fmt))
   2)
 
+(defn- legacy-config-message
+  [{:keys [top-level legacy-rules?]}]
+  (str "Legacy dependency-checker config syntax is no longer supported."
+       (when (seq top-level)
+         (str " Found legacy keys: " (pr-str top-level) "."))
+       (when legacy-rules?
+         " Found legacy component matching rules.")))
+
+(defn- legacy-config-error?
+  [ex]
+  (= "Legacy dependency-checker config syntax is no longer supported."
+     (.getMessage ex)))
+
+(defn- legacy-config-output
+  [config-path source-path ex]
+  (let [details (ex-data ex)]
+    (binding [*out* *err*]
+      (println (legacy-config-message details))
+      (println (format "Regenerate the config with: clj -M:check-dependencies %s --source-path %s --force-init"
+                       config-path source-path)))
+    2))
+
+(defn- handle-analysis-exception
+  [config-path source-path ex]
+  (if (legacy-config-error? ex)
+    (legacy-config-output config-path source-path ex)
+    (throw ex)))
+
+;; Test-visible helper aliases
+(def legacy-config-error-pred legacy-config-error?)
+(def handle-analysis-exception* handle-analysis-exception)
+
 (defn- run-analysis!
-  [{:keys [config-path fmt]}]
-  (let [result (analyze-project (load-config config-path))
-        format-handler ({:edn edn-output
-                         :text text-output}
-                        fmt)]
-    (if format-handler
-      (format-handler result)
-      (unsupported-format-output fmt))))
+  [{:keys [config-path source-path fmt]}]
+  (try
+    (let [result (analyze-project (load-config config-path) source-path)
+          format-handler ({:edn edn-output
+                           :text text-output}
+                          fmt)]
+      (if format-handler
+        (format-handler result)
+        (unsupported-format-output fmt)))
+    (catch clojure.lang.ExceptionInfo ex
+      (handle-analysis-exception config-path source-path ex))))
 
 (defn- run-cli
   [args]

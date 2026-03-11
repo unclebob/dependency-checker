@@ -1,4 +1,4 @@
-;; mutation-tested: 2026-03-07
+;; mutation-tested: 2026-03-11
 (ns dependency-checker.core.report
   (:require [clojure.edn :as edn]
             [clojure.java.io :as io]
@@ -79,7 +79,7 @@
     {}))
 
 (def usage-summary
-  "Usage: clj -M:check-dependencies [config.edn] [--format text|edn] [--init|--force-init] [--help]")
+  "Usage: clj -M:check-dependencies [config.edn] [--source-path path] [--format text|edn] [--init|--force-init] [--help]")
 
 (defn help!
   []

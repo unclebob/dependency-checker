@@ -1,100 +1,67 @@
-;; mutation-tested: 2026-03-07
+;; mutation-tested: 2026-03-11
 (ns dependency-checker.core.base.config
   (:require [clojure.java.io :as io]
             [clojure.string :as str]))
 
 (def default-config
-  {:source-paths ["src"]
-   :include-exts #{".clj" ".cljc" ".cljs"}
-   :component-rules []
+  {:include-exts #{".clj" ".cljc" ".cljs"}
    :allowed-dependencies {}
    :allowed-exceptions []
+   :ignored-components #{}
    :fail-on-cycles true
    :fail-on-violations true})
 
-(defn glob->regex
-  [pattern]
-  (re-pattern
-   (str "^"
-        (-> pattern
-            (str/replace "." "\\.")
-            (str/replace "*" ".*"))
-        "$")))
+(defn ignored-components-set
+  [config]
+  (set (:ignored-components config)))
 
-(defn exact-regex
-  [pattern]
-  (re-pattern (str "^" (java.util.regex.Pattern/quote pattern) "$")))
+(def legacy-config-keys
+  #{:source-paths :component-rules})
 
-(defn wildcard-or-regex?
-  [pattern]
-  (or (str/includes? pattern "*")
-      (str/starts-with? pattern "^")))
+(def legacy-rule-keys
+  #{:match :matches :pattern})
 
-(defn string-pattern->regex
-  [pattern]
-  (if (wildcard-or-regex? pattern)
-    (if (str/starts-with? pattern "^")
-      (re-pattern pattern)
-      (glob->regex pattern))
-    (exact-regex pattern)))
+(defn namespace-segments
+  [ns-sym]
+  (str/split (str ns-sym) #"\."))
 
-(defn pattern->matcher
-  [pattern]
+(defn namespace-root
+  [ns-sym]
+  (first (namespace-segments ns-sym)))
+
+(defn namespace-component
+  ([ns-sym]
+   (let [parts (namespace-segments ns-sym)]
+     (when (>= (count parts) 2)
+       (keyword (second parts)))))
+  ([project-roots ns-sym]
+   (when (contains? project-roots (namespace-root ns-sym))
+     (namespace-component ns-sym))))
+
+(defn- legacy-rule?
+  [value]
   (cond
-    (instance? java.util.regex.Pattern pattern)
-    (fn [s] (boolean (re-find pattern s)))
+    (map? value) (boolean (some legacy-rule-keys (keys value)))
+    (vector? value) (= 2 (count value))
+    :else false))
 
-    (keyword? pattern)
-    (let [exact (name pattern)]
-      (fn [s] (= exact s)))
+(defn legacy-config-details
+  [config]
+  (let [top-level (->> legacy-config-keys
+                       (filter #(contains? config %))
+                       sort
+                       vec)
+        legacy-rules? (some legacy-rule? (:component-rules config))]
+    {:top-level top-level
+     :legacy-rules? (boolean legacy-rules?)}))
 
-    (string? pattern)
-    (let [rx (string-pattern->regex pattern)]
-      (fn [s] (boolean (re-find rx s))))
-
-    :else
-    (fn [_] false)))
-
-(defn normalize-component-rule
-  [rule]
-  (cond
-    (and (vector? rule) (= 2 (count rule)))
-    {:component (first rule) :match (second rule)}
-
-    (and (map? rule) (contains? rule :component))
-    rule
-
-    :else
-    (throw (ex-info "Invalid component rule" {:rule rule}))))
-
-(defn match-patterns
-  [rule]
-  (let [raw-matches (or (:match rule) (:matches rule) (:pattern rule))]
-    (cond
-      (nil? raw-matches) []
-      (sequential? raw-matches) raw-matches
-      :else [raw-matches])))
-
-(defn compile-normalized-rule
-  [rule]
-  (let [matchers (mapv pattern->matcher (match-patterns rule))]
-    {:component (:component rule)
-     :matches? (fn [ns-name]
-                 (boolean (some #(% ns-name) matchers)))}))
-
-(defn compile-component-rules
-  [rules]
-  (->> rules
-       (map normalize-component-rule)
-       (map compile-normalized-rule)
-       vec))
-
-(defn component-for-ns
-  [compiled-rules ns-sym]
-  (let [ns-name (str ns-sym)]
-    (some (fn [{:keys [component matches?]}]
-            (when (matches? ns-name) component))
-          compiled-rules)))
+(defn validate-config!
+  [config]
+  (let [{:keys [top-level legacy-rules?]} (legacy-config-details config)]
+    (when (or (seq top-level) legacy-rules?)
+      (throw (ex-info "Legacy dependency-checker config syntax is no longer supported."
+                      {:top-level top-level
+                       :legacy-rules? legacy-rules?})))))
 
 (defn source-file?
   [^java.io.File f include-exts]
@@ -115,15 +82,17 @@
 
 (defn normalize-forbidden-rule
   [rule]
-  (cond
-    (map? rule) rule
-    (and (vector? rule) (= 2 (count rule))) {:from (first rule) :to (second rule)}
-    :else (throw (ex-info "Invalid forbidden dependency rule" {:rule rule}))))
+  (if (map? rule)
+    rule
+    (if (and (vector? rule) (= 2 (count rule)))
+      (let [[from to] rule]
+        {:from from :to to})
+      (throw (ex-info "Invalid forbidden dependency rule" {:rule rule})))))
 
 (defn compile-exception
   [ex]
-  (let [from-ns-m (when-let [p (:from-ns ex)] (pattern->matcher p))
-        to-ns-m (when-let [p (:to-ns ex)] (pattern->matcher p))]
+  (let [from-ns-m (when-let [p (:from-ns ex)] #(= p %))
+        to-ns-m (when-let [p (:to-ns ex)] #(= p %))]
     (assoc ex
            :from-ns-match? from-ns-m
            :to-ns-match? to-ns-m)))

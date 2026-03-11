@@ -1,15 +1,15 @@
 (ns dependency-checker.core-spec
-  (:require [speclj.core :refer :all]
-            [clojure.edn :as edn]
+  (:require [clojure.edn :as edn]
             [clojure.java.io :as io]
             [clojure.string :as str]
+            [dependency-checker.core :as tool]
             [dependency-checker.core.base.config :as cfg-base]
             [dependency-checker.core.base.dependencies :as dep-base]
             [dependency-checker.core.base.reader :as reader-base]
             [dependency-checker.core.base.stats :as stats-base]
             [dependency-checker.core.graph :as graph]
             [dependency-checker.core.infer :as infer]
-            [dependency-checker.core :as tool]))
+            [speclj.core :refer :all]))
 
 (defn- temp-dir []
   (.toFile (java.nio.file.Files/createTempDirectory "dependency-tool-spec" (make-array java.nio.file.attribute.FileAttribute 0))))
@@ -21,22 +21,18 @@
     (spit f content)))
 
 (describe "dependency-tool/analyze-project"
-  (it "computes component dependencies, cycles, and boundary violations"
+  (it "derives components from the second namespace segment"
     (let [root (temp-dir)]
-      (write-file! root "demo/a.clj"
-                   "(ns demo.a (:require [demo.b :as b] [demo.c :as c]))\n(defprotocol APort (x [this]))\n")
-      (write-file! root "demo/b.clj"
-                   "(ns demo.b (:require [demo.c :as c]))\n(defn b-fn [] :ok)\n")
-      (write-file! root "demo/c.clj"
-                   "(ns demo.c (:require [demo.a :as a]))\n(def ^:private hidden 1)\n(defn c-fn [] :ok)\n")
-      (let [result (tool/analyze-project
-                    {:source-paths [(.getPath root)]
-                     :component-rules [{:component :alpha :match "demo.a"}
-                                       {:component :beta :match "demo.b"}
-                                       {:component :gamma :match "demo.c"}]
-                     :allowed-dependencies {:alpha [:gamma]
-                                              :beta [:gamma]
-                                              :gamma [:alpha]}})]
+      (write-file! root "demo/alpha/core.clj"
+                   "(ns demo.alpha.core (:require [demo.beta.util :as b] [demo.gamma.api :as g]))\n(defprotocol APort (x [this]))\n")
+      (write-file! root "demo/beta/util.clj"
+                   "(ns demo.beta.util (:require [demo.gamma.api :as g]))\n(defn b-fn [] :ok)\n")
+      (write-file! root "demo/gamma/api.clj"
+                   "(ns demo.gamma.api (:require [demo.alpha.core :as a]))\n(defn c-fn [] :ok)\n")
+      (let [result (tool/analyze-project {:allowed-dependencies {:alpha [:gamma]
+                                                                 :beta [:gamma]
+                                                                 :gamma [:alpha]}}
+                                         (.getPath root))]
         (should= #{[:alpha :beta] [:alpha :gamma] [:beta :gamma] [:gamma :alpha]}
                  (set (:component-edges result)))
         (should= 1 (count (:violations result)))
@@ -46,17 +42,13 @@
 
   (it "calculates fan-in, fan-out, instability, abstractness, and distance metrics"
     (let [root (temp-dir)]
-      (write-file! root "demo/a.clj"
-                   "(ns demo.a (:require [demo.b :as b] [demo.c :as c]))\n(defprotocol APort (x [this]))\n")
-      (write-file! root "demo/b.clj"
-                   "(ns demo.b (:require [demo.c :as c]))\n(defn b-fn [] :ok)\n")
-      (write-file! root "demo/c.clj"
-                   "(ns demo.c (:require [demo.a :as a]))\n(defn c-fn [] :ok)\n")
-      (let [result (tool/analyze-project
-                    {:source-paths [(.getPath root)]
-                     :component-rules [{:component :alpha :match "demo.a"}
-                                       {:component :beta :match "demo.b"}
-                                       {:component :gamma :match "demo.c"}]})
+      (write-file! root "demo/alpha/core.clj"
+                   "(ns demo.alpha.core (:require [demo.beta.util :as b] [demo.gamma.api :as c]))\n(defprotocol APort (x [this]))\n")
+      (write-file! root "demo/beta/util.clj"
+                   "(ns demo.beta.util (:require [demo.gamma.api :as c]))\n(defn b-fn [] :ok)\n")
+      (write-file! root "demo/gamma/api.clj"
+                   "(ns demo.gamma.api (:require [demo.alpha.core :as a]))\n(defn c-fn [] :ok)\n")
+      (let [result (tool/analyze-project {} (.getPath root))
             stats (:component-stats result)]
         (should= 1 (get-in stats [:alpha :fan-in]))
         (should= 2 (get-in stats [:alpha :fan-out]))
@@ -64,161 +56,74 @@
         (should= 1 (get-in stats [:alpha :abstract-vars]))
         (should (< (Math/abs (- 0.6666666666666666 (get-in stats [:alpha :instability]))) 1.0e-9))
         (should (< (Math/abs (- 1.0 (get-in stats [:alpha :abstractness]))) 1.0e-9))
-        (should (< (Math/abs (- 0.6666666666666666 (get-in stats [:alpha :distance]))) 1.0e-9))
-        (should (< (Math/abs (- 0.5 (get-in stats [:beta :instability]))) 1.0e-9))
-        (should (< (Math/abs (- 0.0 (get-in stats [:beta :abstractness]))) 1.0e-9))
-        (should (< (Math/abs (- 0.5 (get-in stats [:beta :distance]))) 1.0e-9)))))
-
-  (it "uses allowed-dependencies to flag edges not in the allowed map"
-    (let [root (temp-dir)]
-      (write-file! root "demo/a.clj"
-                   "(ns demo.a (:require [demo.b :as b] [demo.c :as c]))\n")
-      (write-file! root "demo/b.clj"
-                   "(ns demo.b (:require [demo.c :as c]))\n")
-      (write-file! root "demo/c.clj"
-                   "(ns demo.c)\n")
-      (let [result (tool/analyze-project
-                    {:source-paths [(.getPath root)]
-                     :component-rules [{:component :alpha :match "demo.a"}
-                                       {:component :beta :match "demo.b"}
-                                       {:component :gamma :match "demo.c"}]
-                     :allowed-dependencies {:alpha [:gamma]
-                                            :beta [:gamma]
-                                            :gamma []}})]
-        (should= 1 (count (:violations result)))
-        (should= :alpha (:from-component (first (:violations result))))
-        (should= :beta (:to-component (first (:violations result)))))))
-
-  (it "allows all dependencies when component has :all in allowed-dependencies"
-    (let [root (temp-dir)]
-      (write-file! root "demo/a.clj"
-                   "(ns demo.a (:require [demo.b :as b]))\n")
-      (write-file! root "demo/b.clj"
-                   "(ns demo.b)\n")
-      (let [result (tool/analyze-project
-                    {:source-paths [(.getPath root)]
-                     :component-rules [{:component :alpha :match "demo.a"}
-                                       {:component :beta :match "demo.b"}]
-                     :allowed-dependencies {:alpha :all
-                                            :beta []}})]
-        (should= 0 (count (:violations result))))))
+        (should (< (Math/abs (- 0.6666666666666666 (get-in stats [:alpha :distance]))) 1.0e-9)))))
 
   (it "supports allowed exceptions for disallowed component dependencies"
     (let [root (temp-dir)]
-      (write-file! root "demo/a.clj" "(ns demo.a (:require [demo.b :as b]))\n(defn call [] (b/id))\n")
-      (write-file! root "demo/b.clj" "(ns demo.b)\n(defn id [] :ok)\n")
-      (let [result (tool/analyze-project
-                    {:source-paths [(.getPath root)]
-                     :component-rules [{:component :left :match "demo.a"}
-                                       {:component :right :match "demo.b"}]
-                     :allowed-dependencies {:left []
-                                            :right []}
-                     :allowed-exceptions [{:from-ns "demo.a" :to-ns "demo.b"}]})]
+      (write-file! root "demo/left/core.clj" "(ns demo.left.core (:require [demo.right.api :as b]))\n(defn call [] (b/id))\n")
+      (write-file! root "demo/right/api.clj" "(ns demo.right.api)\n(defn id [] :ok)\n")
+      (let [result (tool/analyze-project {:allowed-dependencies {:left []
+                                                                 :right []}
+                                          :allowed-exceptions [{:from-ns "demo.left.core"
+                                                                :to-ns "demo.right.api"}]}
+                                         (.getPath root))]
         (should= [] (:violations result)))))
 
   (it "includes dynamic namespace lookups in dependency metrics and emits warnings"
     (let [root (temp-dir)]
-      (write-file! root "demo/a.clj"
-                   "(ns demo.a (:import [demo.imported Thing]))\n(require '[demo.b :as b])\n(defn call []\n  (requiring-resolve 'demo.c/run)\n  (resolve 'demo.d/id)\n  (ns-resolve 'demo.e 'id)\n  (find-ns 'demo.f)\n  (the-ns 'demo.g)\n  (b/id))\n")
-      (write-file! root "demo/b.clj" "(ns demo.b)\n(defn id [] :ok)\n")
-      (write-file! root "demo/c.clj" "(ns demo.c)\n(defn run [] :ok)\n")
-      (write-file! root "demo/d.clj" "(ns demo.d)\n(defn id [] :ok)\n")
-      (write-file! root "demo/e.clj" "(ns demo.e)\n(defn id [] :ok)\n")
-      (write-file! root "demo/f.clj" "(ns demo.f)\n(defn id [] :ok)\n")
-      (write-file! root "demo/g.clj" "(ns demo.g)\n(defn id [] :ok)\n")
-      (let [result (tool/analyze-project
-                    {:source-paths [(.getPath root)]
-                     :component-rules [{:component :alpha :match "demo.a"}
-                                       {:component :beta :match "demo.b"}
-                                       {:component :gamma :match "demo.c"}
-                                       {:component :delta :match "demo.d"}
-                                       {:component :epsilon :match "demo.e"}
-                                       {:component :zeta :match "demo.f"}
-                                       {:component :eta :match "demo.g"}
-                                       {:component :imports :match "demo.imported"}]})
+      (write-file! root "demo/alpha/core.clj"
+                   "(ns demo.alpha.core (:import [demo.imports Thing]))\n(require '[demo.beta.api :as b])\n(defn call []\n  (requiring-resolve 'demo.gamma/run)\n  (resolve 'demo.delta/id)\n  (ns-resolve 'demo.epsilon 'id)\n  (find-ns 'demo.zeta)\n  (the-ns 'demo.eta)\n  (b/id))\n")
+      (write-file! root "demo/beta/api.clj" "(ns demo.beta.api)\n(defn id [] :ok)\n")
+      (write-file! root "demo/gamma/run.clj" "(ns demo.gamma.run)\n(defn run [] :ok)\n")
+      (write-file! root "demo/delta/id.clj" "(ns demo.delta.id)\n(defn id [] :ok)\n")
+      (write-file! root "demo/epsilon/id.clj" "(ns demo.epsilon.id)\n(defn id [] :ok)\n")
+      (write-file! root "demo/zeta/core.clj" "(ns demo.zeta.core)\n(defn id [] :ok)\n")
+      (write-file! root "demo/eta/core.clj" "(ns demo.eta.core)\n(defn id [] :ok)\n")
+      (let [result (tool/analyze-project {} (.getPath root))
             stats (:component-stats result)]
-        (should= #{[:alpha :beta] [:alpha :gamma] [:alpha :delta] [:alpha :epsilon] [:alpha :zeta] [:alpha :eta] [:alpha :imports]}
+        (should= #{[:alpha :beta] [:alpha :delta] [:alpha :epsilon] [:alpha :eta] [:alpha :gamma] [:alpha :imports] [:alpha :zeta]}
                  (set (:component-edges result)))
         (should= 7 (get-in stats [:alpha :fan-out]))
         (should= 5 (count (:warnings result)))
-        (should (every? #(= "demo.a" (:namespace %)) (:warnings result))))))
+        (should (every? #(= "demo.alpha.core" (:namespace %)) (:warnings result))))))
 
-  (it "generates a starter config with inferred component rules"
+  (it "rejects legacy config syntax and recommends regeneration"
+    (let [root (temp-dir)
+          cfg-path (.getPath (io/file root "dependency-checker.edn"))
+          err (java.io.StringWriter.)]
+      (write-file! root "demo/alpha/core.clj" "(ns demo.alpha.core)\n")
+      (spit cfg-path "{:source-paths [\"src\"] :component-rules [{:component :alpha :match \"demo.alpha*\"}]}")
+      (binding [*err* err]
+        (should= 2 (#'tool/run-cli [cfg-path "--source-path" (.getPath root)])))
+      (should (str/includes? (str err) "Legacy dependency-checker config syntax is no longer supported."))
+      (should (str/includes? (str err) "--force-init"))))
+
+  (it "ignores configured components completely during analysis"
     (let [root (temp-dir)]
-      (write-file! root "empire/application/runtime.cljc" "(ns empire.application.runtime)\n")
-      (write-file! root "empire/adapters/state.cljc" "(ns empire.adapters.state)\n")
-      (write-file! root "empire/acceptance/parser.cljc" "(ns empire.acceptance.parser)\n")
-      (write-file! root "empire/acceptance/generator.cljc" "(ns empire.acceptance.generator)\n")
-      (let [cfg (#'tool/generate-starter-config [(.getPath root)])
-            by-component (into {} (map (juxt :component identity) (:component-rules cfg)))]
-        (should= "empire.application*" (:match (get by-component :application)))
-        (should= "empire.adapters*" (:match (get by-component :adapters)))
-        (should= "empire.acceptance*" (:match (get by-component :acceptance)))))
+      (write-file! root "demo/core/main.clj"
+                   "(ns demo.core.main (:require [demo.cli.app :as cli] [demo.spec-runner.main :as sr]))\n(defn run [] [cli sr])\n")
+      (write-file! root "demo/cli/app.clj"
+                   "(ns demo.cli.app)\n(defn run [] :ok)\n")
+      (write-file! root "demo/spec_runner/main.clj"
+                   "(ns demo.spec-runner.main (:require [demo.cli.app :as cli]))\n(defn run [] (cli/run))\n")
+      (let [result (tool/analyze-project {:allowed-dependencies {:core []
+                                                                 :cli []
+                                                                 :spec-runner :all}
+                                          :ignored-components [:spec-runner]}
+                                         (.getPath root))]
+        (should= #{:core :cli} (set (keys (:component-stats result))))
+        (should= #{[:core :cli]} (set (:component-edges result)))
+        (should= [] (:warnings result))
+        (should= 1 (count (:violations result)))
+        (should= :core (:from-component (first (:violations result))))
+        (should= :cli (:to-component (first (:violations result)))))))
+  )
 
-  (it "generates starter config allowed-dependencies from observed component edges"
-    (let [root (temp-dir)]
-      (write-file! root "demo/a/core.clj"
-                   "(ns demo.a.core (:require [demo.b.core :as b] [demo.c.core :as c]))\n(defn run [] (b/run) (c/run))\n")
-      (write-file! root "demo/b/core.clj"
-                   "(ns demo.b.core (:require [demo.c.core :as c]))\n(defn run [] (c/run))\n")
-      (write-file! root "demo/c/core.clj"
-                   "(ns demo.c.core)\n(defn run [] :ok)\n")
-      (let [cfg (#'tool/generate-starter-config [(.getPath root)])]
-        (should= {:a [:b :c]
-                  :b [:c]
-                  :c []}
-                 (:allowed-dependencies cfg)))))
-
-  (it "infers abstract and concrete component roots from module abstractness"
-    (let [root (temp-dir)]
-      (write-file! root "empire/api/protocols.cljc"
-                   "(ns empire.api.protocols)\n(defprotocol Port (go [this]))\n")
-      (write-file! root "empire/api/events.cljc"
-                   "(ns empire.api.events)\n(defmulti handle-event :type)\n")
-      (write-file! root "empire/impl/service_a.cljc"
-                   "(ns empire.impl.service-a (:require [empire.api.protocols :as p]))\n(defn run [] :ok)\n")
-      (write-file! root "empire/impl/service_b.cljc"
-                   "(ns empire.impl.service-b (:require [empire.api.events :as e]))\n(defn execute [] :ok)\n")
-      (let [cfg (#'tool/generate-starter-config [(.getPath root)])
-            by-component (into {} (map (juxt :component identity) (:component-rules cfg)))]
-        (should= "empire.api*" (:match (get by-component :api)))
-        (should= "empire.impl*" (:match (get by-component :impl))))))))
-
-(describe "dependency-tool helper behavior"
-  (it "matches patterns for keyword, exact string, glob, and regex"
-    (let [kw-m (#'tool/pattern->matcher :demo.ns)
-          exact-m (#'tool/pattern->matcher "demo.ns")
-          glob-m (#'tool/pattern->matcher "demo.*")
-          rx-m (#'tool/pattern->matcher "^demo\\..*")
-          invalid-m (#'tool/pattern->matcher 42)]
-      (should (kw-m "demo.ns"))
-      (should-not (kw-m "demo.other"))
-      (should (exact-m "demo.ns"))
-      (should-not (exact-m "demo.ns.x"))
-      (should (glob-m "demo.alpha"))
-      (should (rx-m "demo.beta"))
-      (should-not (invalid-m "anything"))))
-
-  (it "normalizes component rules in map and vector forms"
-    (let [map-rule (#'tool/compile-normalized-rule (#'tool/normalize-component-rule {:component :c1 :match "demo.*"}))
-          vec-rule (#'tool/compile-normalized-rule (#'tool/normalize-component-rule [:c2 "demo.x"]))
-          invalid-rule (fn [] (#'tool/normalize-component-rule :bad))]
-      (should= :c1 (:component map-rule))
-      (should ((:matches? map-rule) "demo.a"))
-      (should= :c2 (:component vec-rule))
-      (should ((:matches? vec-rule) "demo.x"))
-      (should-not ((:matches? vec-rule) "demo.y"))
-      (should-throw clojure.lang.ExceptionInfo (invalid-rule))))
-
-  (it "normalizes match-patterns for nil, scalar, and sequential definitions"
-    (should= [] (#'tool/match-patterns {:component :a}))
-    (should= ["demo.*"] (#'tool/match-patterns {:component :a :match "demo.*"}))
-    (should= ["demo.a" "demo.b"] (#'tool/match-patterns {:component :a :matches ["demo.a" "demo.b"]})))
-
+(describe "dependency-tool config and reporting"
   (it "reads and writes config and reports usage and help text"
     (let [root (temp-dir)
           cfg-file (io/file root "dep.edn")
-          cfg {:source-paths ["src"] :component-rules [{:component :a :match "a.*"}]}
+          cfg {:allowed-dependencies {:alpha [:beta]}}
           usage-output (binding [*err* (java.io.StringWriter.)]
                          (let [code (#'tool/usage!)]
                            {:code code :text (str *err*)}))
@@ -230,9 +135,9 @@
       (should= cfg (#'tool/load-config (.getPath cfg-file)))
       (should= {} (#'tool/load-config (.getPath (io/file root "missing.edn"))))
       (should= 2 (:code usage-output))
-      (should (str/includes? (:text usage-output) "Usage: clj -M:check-dependencies"))
+      (should (str/includes? (:text usage-output) "[config.edn] [--source-path path]"))
       (should= 0 (:code help-output))
-      (should (str/includes? (:text help-output) "Usage: clj -M:check-dependencies"))))
+      (should (str/includes? (:text help-output) "[config.edn] [--source-path path]"))))
 
   (it "formats text report with warnings, violations, and cycles"
     (let [report (with-out-str
@@ -252,68 +157,165 @@
       (should (str/includes? report "Warnings: 1"))
       (should (str/includes? report "demo.a uses requiring-resolve -> demo.b"))
       (should (str/includes? report "Boundary Violations"))
-      (should (str/includes? report "Cycles")))))
+      (should (str/includes? report "Cycles"))))
+
+  (it "computes failure output status from configured gates"
+    (should (#'tool/failure? {:config {:fail-on-violations true
+                                       :fail-on-cycles true}
+                              :violations [{:from-component :a}]
+                              :cycles []}))
+    (should (#'tool/failure? {:config {:fail-on-violations false
+                                       :fail-on-cycles true}
+                              :violations []
+                              :cycles [[:a :b]]}))
+    (should-not (#'tool/failure? {:config {:fail-on-violations false
+                                           :fail-on-cycles false}
+                                  :violations [{:from-component :a}]
+                                  :cycles [[:a :b]]})))
+
+  (it "returns status codes for text and edn output"
+    (let [ok-result {:config {:fail-on-violations true
+                              :fail-on-cycles true}
+                     :violations []
+                     :cycles []}
+          fail-result {:config {:fail-on-violations true
+                                :fail-on-cycles true}
+                       :violations [{:from-component :a}]
+                       :cycles []}
+          out (java.io.StringWriter.)]
+      (with-redefs [tool/report-text (fn [_] (println "report"))]
+        (binding [*out* out]
+          (should= 0 (#'tool/text-output ok-result))
+          (should= 1 (#'tool/text-output fail-result))))
+      (binding [*out* out]
+        (should= 0 (#'tool/edn-output ok-result))
+        (should= 1 (#'tool/edn-output fail-result)))))
+
+  (it "formats the legacy config error message"
+    (should= "Legacy dependency-checker config syntax is no longer supported."
+             (#'tool/legacy-config-message {:top-level []
+                                            :legacy-rules? false}))
+    (should (str/includes? (#'tool/legacy-config-message {:top-level [:component-rules]
+                                                          :legacy-rules? true})
+                           "Found legacy keys: [:component-rules].")))
+
+  (it "identifies legacy config exceptions by message"
+    (should (tool/legacy-config-error-pred (ex-info "Legacy dependency-checker config syntax is no longer supported."
+                                                    {})))
+    (should-not (tool/legacy-config-error-pred (ex-info "Different failure" {}))))
+
+  (it "handles analysis exceptions for legacy and non-legacy errors"
+    (let [legacy-ex (ex-info "Legacy dependency-checker config syntax is no longer supported."
+                             {:top-level [:source-paths] :legacy-rules? false})
+          other-ex (ex-info "Different failure" {:kind :other})
+          err-out (java.io.StringWriter.)]
+      (binding [*err* err-out]
+        (should= 2 (tool/handle-analysis-exception* "dep.edn" "src" legacy-ex)))
+      (should (str/includes? (str err-out) "Regenerate the config with:"))
+      (should-throw clojure.lang.ExceptionInfo
+                    (tool/handle-analysis-exception* "dep.edn" "src" other-ex))))
+
+  (it "run-analysis dispatches text edn and legacy config errors"
+    (let [cfg-path "dep.edn"
+          text-out (java.io.StringWriter.)
+          edn-out (java.io.StringWriter.)
+          err-out (java.io.StringWriter.)
+          ok-result {:config {:fail-on-violations true
+                              :fail-on-cycles true}
+                     :component-stats {}
+                     :violations []
+                     :cycles []
+                     :component-edges []
+                     :warnings []}]
+      (with-redefs [tool/load-config (fn [_] {})
+                    tool/analyze-project (fn [_ _] ok-result)
+                    tool/report-text (fn [_] (println "text-report"))]
+        (binding [*out* text-out]
+          (should= 0 (#'tool/run-analysis! {:config-path cfg-path
+                                            :source-path "src"
+                                            :fmt :text})))
+        (binding [*out* edn-out]
+          (should= 0 (#'tool/run-analysis! {:config-path cfg-path
+                                            :source-path "src"
+                                            :fmt :edn}))))
+      (with-redefs [tool/load-config (fn [_] {})
+                    tool/analyze-project (fn [_ _]
+                                           (throw (ex-info "Legacy dependency-checker config syntax is no longer supported."
+                                                           {:top-level [:source-paths]
+                                                            :legacy-rules? false})))]
+        (binding [*err* err-out]
+          (should= 2 (#'tool/run-analysis! {:config-path cfg-path
+                                            :source-path "src"
+                                            :fmt :text}))))
+      (should (str/includes? (str text-out) "text-report"))
+      (should (str/includes? (str edn-out) ":component-stats"))
+      (should (str/includes? (str err-out) "Regenerate the config with:"))))
+
+  (it "run-analysis rethrows non-legacy ExceptionInfo"
+    (with-redefs [tool/load-config (fn [_] {})
+                  tool/analyze-project (fn [_ _]
+                                         (throw (ex-info "Different failure"
+                                                         {:kind :other})))]
+      (should-throw clojure.lang.ExceptionInfo
+                    (#'tool/run-analysis! {:config-path "dep.edn"
+                                           :source-path "src"
+                                           :fmt :text}))))
+  )
 
 (describe "dependency-tool CLI flow"
   (it "parses args with defaults"
     (let [defaults (#'tool/parse-args [])]
       (should= "dependency-checker.edn" (:config-path defaults))
+      (should= "src" (:source-path defaults))
       (should= :text (:fmt defaults))
       (should= false (:help? defaults))
       (should= false (:init? defaults))
       (should= false (:force-init? defaults))))
 
-  (it "parses explicit config path and options"
-    (let [parsed (#'tool/parse-args ["cfg.edn" "--format" "edn" "--init"])]
+  (it "parses explicit config path source path and options"
+    (let [parsed (#'tool/parse-args ["cfg.edn" "--source-path" "lib" "--format" "edn" "--init"])]
       (should= "cfg.edn" (:config-path parsed))
+      (should= "lib" (:source-path parsed))
       (should= :edn (:fmt parsed))
       (should= true (:init? parsed))
       (should= false (:force-init? parsed))))
 
-  (it "parses --help flag"
-    (let [parsed (#'tool/parse-args ["--help"])]
-      (should= "dependency-checker.edn" (:config-path parsed))
-      (should= true (:help? parsed))))
-
-  (it "returns usage error for unknown option"
+  (it "returns usage error for too many positional args or unknown options"
+    (should= :usage (:error (#'tool/parse-args ["a" "b"])))
     (should= :usage (:error (#'tool/parse-args ["--unknown"])))
-    (should= :usage (:error (#'tool/parse-args ["--format"]))))
+    (should= :usage (:error (#'tool/parse-args ["--format"])))
+    (should= :usage (:error (#'tool/parse-args ["--source-path"]))))
 
-  (it "run-cli creates config for --init"
+  (it "run-cli passes source path into config generation"
     (let [root (temp-dir)
-          cfg-path (.getPath (io/file root "dep.edn"))]
-      (with-redefs [tool/generate-starter-config (fn [] {:source-paths ["src"] :component-rules []})]
-        (should= 0 (#'tool/run-cli [cfg-path "--init"])))
+          cfg-path (.getPath (io/file root "dep.edn"))
+          seen (atom nil)]
+      (with-redefs [tool/generate-starter-config (fn [source-path]
+                                                   (reset! seen source-path)
+                                                   {:allowed-dependencies {:alpha []}})]
+        (should= 0 (#'tool/run-cli [cfg-path "--source-path" "lib" "--init"])))
+      (should= "lib" @seen)
       (should (.exists (io/file cfg-path)))))
 
-  (it "run-cli --init does not overwrite existing config"
+  (it "apply-config-action handles create noop and analyze actions"
     (let [root (temp-dir)
-          cfg-path (.getPath (io/file root "dep.edn"))]
-      (with-redefs [tool/generate-starter-config (fn [] {:source-paths ["src"] :component-rules []})]
-        (should= 0 (#'tool/run-cli [cfg-path "--init"])))
-      (let [before (slurp cfg-path)]
-        (should= 0 (#'tool/run-cli [cfg-path "--init"]))
-        (should= before (slurp cfg-path)))))
-
-  (it "run-cli overwrites existing config for --force-init"
-    (let [root (temp-dir)
-          cfg-path (.getPath (io/file root "dep.edn"))]
-      (with-redefs [tool/generate-starter-config (fn [] {:source-paths ["src"] :component-rules []})]
-        (should= 0 (#'tool/run-cli [cfg-path "--init"])))
-      (with-redefs [tool/generate-starter-config (fn [] {:source-paths ["other"] :component-rules []})]
-        (should= 0 (#'tool/run-cli [cfg-path "--force-init"])))
-      (should (str/includes? (slurp cfg-path) "other"))))
-
-  (it "run-cli returns usage error when --init and --force-init are both set"
-    (let [root (temp-dir)
-          cfg-path (.getPath (io/file root "dep.edn"))]
-      (should= 2 (#'tool/run-cli [cfg-path "--init" "--force-init"]))))
+          cfg-path (.getPath (io/file root "dep.edn"))
+          out (java.io.StringWriter.)]
+      (with-redefs [tool/generate-starter-config (fn [_] {:allowed-dependencies {}})]
+        (binding [*out* out]
+          (should= 0 (#'tool/apply-config-action! :create cfg-path "src"))
+          (should= 0 (#'tool/apply-config-action! :recreate cfg-path "src"))
+          (should= 0 (#'tool/apply-config-action! :noop-init cfg-path "src"))
+          (should= nil (#'tool/apply-config-action! :analyze cfg-path "src"))))
+      (should (str/includes? (str out) "Created starter dependency config"))
+      (should (str/includes? (str out) "Recreated starter dependency config"))
+      (should (str/includes? (str out) "not overwritten"))))
 
   (it "run-cli returns 2 for unsupported format"
     (let [root (temp-dir)
           cfg-path (.getPath (io/file root "dep.edn"))]
       (spit cfg-path "{}")
-      (with-redefs [tool/analyze-project (fn [_]
+      (with-redefs [tool/analyze-project (fn [_ _]
                                            {:config {:fail-on-violations true :fail-on-cycles true}
                                             :component-stats {:alpha {:distance 0.0}}
                                             :violations []
@@ -323,92 +325,19 @@
                     tool/report-text (fn [& _] nil)]
         (should= 2 (#'tool/run-cli [cfg-path "--format" "xml"])))))
 
-  (it "run-cli returns 1 when analysis fails"
-    (let [root (temp-dir)
-          cfg-path (.getPath (io/file root "dep.edn"))]
-      (spit cfg-path "{}")
-      (with-redefs [tool/analyze-project (fn [_]
-                                           {:config {:fail-on-violations true :fail-on-cycles true}
-                                            :component-stats {:alpha {:distance 1.2}}
-                                            :violations [{:from-component :a}]
-                                            :cycles []
-                                            :component-edges []
-                                            :warnings []})
-                    tool/report-text (fn [& _] nil)]
-        (should= 1 (#'tool/run-cli [cfg-path])))))
-
-  (it "run-cli returns 0 when analysis passes"
-    (let [root (temp-dir)
-          cfg-path (.getPath (io/file root "dep.edn"))]
-      (spit cfg-path "{}")
-      (with-redefs [tool/analyze-project (fn [_]
-                                           {:config {:fail-on-violations true :fail-on-cycles true}
-                                            :component-stats {:alpha {:distance 0.0}}
-                                            :violations []
-                                            :cycles []
-                                            :component-edges []
-                                            :warnings []})
-                    tool/report-text (fn [& _] nil)]
-        (should= 0 (#'tool/run-cli [cfg-path])))))
-
-  (it "run-cli supports edn output format"
-    (let [root (temp-dir)
-          cfg-path (.getPath (io/file root "dep.edn"))
-          result {:config {:fail-on-violations true :fail-on-cycles true}
-                  :component-stats {:alpha {:distance 0.0}}
-                  :violations []
-                  :cycles []
-                  :component-edges []
-                  :warnings []}
-          out (java.io.StringWriter.)]
-      (spit cfg-path "{}")
-      (with-redefs [tool/analyze-project (fn [_] result)]
-        (binding [*out* out]
-          (should= 0 (#'tool/run-cli [cfg-path "--format" "edn"]))))
-      (should (str/includes? (str out) ":component-stats"))))
-
-  (it "run-cli returns 0 for --force-init when config does not yet exist"
-    (let [root (temp-dir)
-          cfg-path (.getPath (io/file root "dep.edn"))]
-      (with-redefs [tool/generate-starter-config (fn [] {:source-paths ["src"]})]
-        (should= 0 (#'tool/run-cli [cfg-path "--force-init"])))))
-
-  (it "run-cli returns usage error for unknown top-level argument"
-    (should= 2 (#'tool/run-cli ["--bogus"])))
-
-  (it "run-cli returns usage error for missing --format value"
-    (should= :usage (:error (#'tool/parse-args ["--format"])))
-    (should= 2 (#'tool/run-cli ["--format"])))
-
-  (it "run-cli prints help and exits 0 for --help"
+  (it "run-cli returns 0 for --help"
     (let [out (java.io.StringWriter.)]
       (binding [*out* out]
         (should= 0 (#'tool/run-cli ["--help"])))
       (should (str/includes? (str out) "Usage: clj -M:check-dependencies")))))
 
-(describe "dependency-tool inference helpers"
-  (it "infers concrete prefixes and prefix helpers"
-    (let [records [{:namespace "empire.api.port" :requires #{} :public-count 1 :abstract-count 1}
-                   {:namespace "empire.impl.a" :requires #{"empire.api.port"} :public-count 1 :abstract-count 0}
-                   {:namespace "empire.impl.b" :requires #{"empire.api.port"} :public-count 1 :abstract-count 0}]
-          abstract-prefixes #{"empire.api"}
-          concrete (#'tool/infer-concrete-prefixes records abstract-prefixes)]
-      (should (contains? concrete "empire.impl"))
-      (should= "empire" (#'tool/parent-prefix "empire.api"))
-      (should= nil (#'tool/parent-prefix "empire"))
-      (should= "empire.api" (#'tool/best-abstract-prefix abstract-prefixes "empire.api.port")))))
+(describe "dependency-tool helpers"
+  (it "extracts namespace components from the second segment"
+    (should= :alpha (#'tool/namespace-component 'demo.alpha.core))
+    (should= :alpha (#'tool/namespace-component "demo.alpha.core"))
+    (should= nil (#'tool/namespace-component 'demo)))
 
-  (it "covers infer helpers for prefixes, abstractness, and component naming"
-    (should= ["empire"] (vec (infer/ns-prefixes "empire")))
-    (should= ["empire" "empire.api" "empire.api.port"]
-             (vec (infer/ns-prefixes "empire.api.port")))
-    (should-not (infer/module-abstract? {:public-count 1 :abstract-count 0}))
-    (should (infer/module-abstract? {:public-count 2 :abstract-count 2}))
-    (should= :api-port (infer/prefix->component "empire" "empire.api.port"))
-    (should= :demo-core (infer/prefix->component "empire" "demo.core")))
-
-(describe "dependency-tool decrap targets"
-  (it "handles ns-target for symbol, string, quoted symbol, and unsupported types"
+  (it "handles ns-target for symbol string quoted symbol and unsupported types"
     (should= 'demo.ns (#'tool/ns-target 'demo.ns))
     (should= 'demo.ns (#'tool/ns-target "demo.ns"))
     (should= 'demo.ns (#'tool/ns-target '(quote demo.ns)))
@@ -423,7 +352,7 @@
     (should= ['demo.zeta] (#'tool/dynamic-lookup-targets '(the-ns 'demo.zeta)))
     (should= [] (#'tool/dynamic-lookup-targets '(println "x"))))
 
-  (it "covers dependency helper branches for require targets, call detection, and warnings"
+  (it "covers dependency helper branches and warnings"
     (should= nil (dep-base/require-target [:as :not-a-target]))
     (should (dep-base/called? '(require 'demo.a) "require"))
     (should-not (dep-base/called? '(println :x) "require"))
@@ -431,91 +360,162 @@
                :callee "requiring-resolve"
                :targets ["demo.alpha"]}]
              (dep-base/extract-dynamic-lookup-warnings
-             ['(println :x)
+              ['(println :x)
                '(requiring-resolve 'demo.alpha/run)])))
 
-  (it "covers stats helper branch when var name is not a symbol"
+  (it "covers stats and reader helpers"
     (should= nil (stats-base/var-symbol '(def 42 :x)))
-    (should= 'ok (stats-base/var-symbol '(def ok :x))))
-
-  (it "covers reader ns-form predicate true and false cases"
+    (should= 'ok (stats-base/var-symbol '(def ok :x)))
     (should (reader-base/ns-form? '(ns demo.core)))
     (should-not (reader-base/ns-form? '(defn x [] 1))))
 
-  (it "matches dependency exceptions by component and namespace rules"
+  (it "matches dependency exceptions and validates legacy config syntax"
     (let [ex (#'tool/compile-exception {:from-component :a
                                         :to-component :b
                                         :from-ns "demo.from"
                                         :to-ns "demo.to"})
-          edge {:from-component :a :to-component :b :from-ns "demo.from" :to-ns "demo.to"}
-          wrong-comp (assoc edge :to-component :c)
-          wrong-ns (assoc edge :to-ns "demo.other")]
+          edge {:from-component :a :to-component :b :from-ns "demo.from" :to-ns "demo.to"}]
       (should (#'tool/exception-matches? ex edge))
-      (should-not (#'tool/exception-matches? ex wrong-comp))
-      (should-not (#'tool/exception-matches? ex wrong-ns))
-      (should (#'tool/exception-matches? (#'tool/compile-exception {}) edge))))
+      (should= #{:a :b} (cfg-base/ignored-components-set {:ignored-components [:a :b]}))
+      (should-throw clojure.lang.ExceptionInfo
+                    (#'tool/validate-config! {:source-paths ["src"]}))
+      (should-throw clojure.lang.ExceptionInfo
+                    (#'tool/validate-config! {:component-rules [{:component :a :match "demo.a*"}]}))))
 
-  (it "covers config helper branches for matchers, abs-num, forbidden rules, and exceptions"
-    (let [kw-matcher (#'tool/pattern->matcher :demo.ns)
-          bad-matcher (#'tool/pattern->matcher 1234)]
-      (should (kw-matcher "demo.ns"))
-      (should-not (kw-matcher "demo.other"))
-      (should-not (bad-matcher "anything")))
-    (should= 3 (cfg-base/abs-num -3))
-    (should= 3 (cfg-base/abs-num 3))
+  (it "covers forbidden-rule normalization and legacy rule detection branches"
+    (should= {:from :a :to :b} (cfg-base/normalize-forbidden-rule {:from :a :to :b}))
     (should= {:from :a :to :b} (cfg-base/normalize-forbidden-rule [:a :b]))
     (should-throw clojure.lang.ExceptionInfo (cfg-base/normalize-forbidden-rule [:a :b :c]))
-    (should (#'tool/exception-matches?
-             (#'tool/compile-exception {:from-component :a})
-             {:from-component :a :to-component :z :from-ns "x" :to-ns "y"})))
+    (should (#'cfg-base/legacy-rule? {:match "demo.a*"}))
+    (should (#'cfg-base/legacy-rule? [:a "demo.a*"]))
+    (should-not (#'cfg-base/legacy-rule? :nope))
+    (should= {:top-level [:component-rules :source-paths]
+              :legacy-rules? true}
+             (cfg-base/legacy-config-details {:source-paths ["src"]
+                                              :component-rules [{:component :a :match "demo.a*"}]})))
 
   (it "does not add self dependencies when inferring allowed dependencies"
-    (let [records [{:namespace "demo.app.alpha.core"
-                    :requires #{"demo.app.alpha.util"}}
-                   {:namespace "demo.app.alpha.util"
+    (let [records [{:namespace "demo.alpha.core"
+                    :requires #{"demo.alpha.util"}}
+                   {:namespace "demo.alpha.util"
                     :requires #{}}
-                   {:namespace "demo.app.beta.core"
-                    :requires #{"demo.app.alpha.core"}}]
-          rules [{:component :alpha :match "demo.app.alpha*"}
-                 {:component :beta :match "demo.app.beta*"}]
-          inferred (infer/infer-allowed-deps records rules)]
+                   {:namespace "demo.beta.core"
+                    :requires #{"demo.alpha.core"}}]
+          inferred (infer/infer-allowed-deps records)]
       (should= [] (get inferred :alpha))
       (should= [:alpha] (get inferred :beta))))
 
-  (it "infers abstract prefixes from fully abstract namespace trees"
-    (let [records [{:namespace "demo.api.port" :public-count 1 :abstract-count 1}
-                   {:namespace "demo.api.events" :public-count 1 :abstract-count 1}
-                   {:namespace "demo.impl.core" :public-count 1 :abstract-count 0}]
-          inferred (#'tool/infer-abstract-prefixes records)]
-      (should (contains? inferred "demo.api"))
-      (should-not (contains? inferred "demo.impl"))))
-
-  (it "generates a starter config for empty source roots"
+  (it "covers infer helper functions for source records and component aggregation"
     (let [root (temp-dir)
-          cfg (#'tool/generate-starter-config [(.getPath root)])]
-      (should= [(.getPath root)] (:source-paths cfg))
-      (should (vector? (:component-rules cfg)))
-      (should (map? (:allowed-dependencies cfg)))
-      (should= true (:fail-on-cycles cfg))
-      (should= true (:fail-on-violations cfg))))
+          forms '((ns demo.alpha.core (:require [demo.beta.api :as b]))
+                  (defprotocol Port (go [this])))
+          records [{:namespace "demo.alpha.core" :requires #{"demo.beta.api" "demo.alpha.util"}}
+                   {:namespace "demo.alpha.util" :requires #{}}
+                   {:namespace "demo.beta.api" :requires #{}}]
+          roots (#'infer/project-roots records)
+          ns->component (#'infer/namespace->component-map roots records)
+          components (#'infer/components roots records)]
+      (write-file! root "demo/alpha/core.clj"
+                   "(ns demo.alpha.core (:require [demo.beta.api :as b]))\n(defprotocol Port (go [this]))\n")
+      (should= {:namespace "demo.alpha.core"
+                :requires #{"demo.beta.api"}
+                :public-count 1
+                :abstract-count 1}
+               (#'infer/source-ns-record forms))
+      (should= #{"demo"} roots)
+      (should= {"demo.alpha.core" :alpha
+                "demo.alpha.util" :alpha
+                "demo.beta.api" :beta}
+               ns->component)
+      (should= [:alpha :beta] components)
+      (should= :beta (#'infer/dependency-component roots ns->component "demo.beta.api"))
+      (should= nil (#'infer/dependency-component roots ns->component "clojure.string"))
+      (should= {:alpha #{:beta} :beta #{}}
+               (#'infer/add-component-dependency {:alpha #{} :beta #{}} :alpha :beta))
+      (should= {:alpha #{} :beta #{}}
+               (#'infer/add-component-dependency {:alpha #{} :beta #{}} :alpha :alpha))
+      (should= {:alpha #{:beta} :beta #{}}
+               (#'infer/record-component-deps roots
+                                              ns->component
+                                              {:alpha #{} :beta #{}}
+                                              {:namespace "demo.alpha.core"
+                                               :requires #{"demo.beta.api" "demo.alpha.util"}}))
+      (should= {:alpha [:beta] :beta []}
+               (#'infer/sorted-dependency-map components {:alpha #{:beta} :beta #{}}))
+      (should= [{:namespace "demo.alpha.core"
+                 :requires #{"demo.beta.api"}
+                 :public-count 1
+                 :abstract-count 1}]
+               (infer/source-ns-records (.getPath root) #{".clj"}))))
 
-  (it "generates starter config with fallback namespace partitioning"
+  (it "generates starter config from multiple namespace shapes through the public path"
     (let [root (temp-dir)]
-      (write-file! root "demo/a/core.clj" "(ns demo.a.core)\n")
-      (write-file! root "demo/b/core.clj" "(ns demo.b.core)\n")
-      (let [cfg (#'tool/generate-starter-config [(.getPath root)])
-            components (set (map :component (:component-rules cfg)))]
-        (should (contains? components :a))
-        (should (contains? components :b)))))
+      (write-file! root "demo/alpha/core.clj"
+                   "(ns demo.alpha.core (:require [demo.beta.api :as b] [demo.alpha.util :as u]))\n(defprotocol Port (go [this]))\n")
+      (write-file! root "demo/alpha/util.clj"
+                   "(ns demo.alpha.util)\n(defn helper [] :ok)\n")
+      (write-file! root "demo/beta/api.clj"
+                   "(ns demo.beta.api (:require [demo.gamma.core :as g]))\n(defn run [] (g/id))\n")
+      (write-file! root "demo/gamma/core.clj"
+                   "(ns demo.gamma.core)\n(defn id [] :ok)\n")
+      (write-file! root "demo/misc/no_ns.clj"
+                   "(defn x [] :ignored)\n")
+      (should= {:allowed-dependencies {:alpha [:beta]
+                                       :beta [:gamma]
+                                       :gamma []}
+                :fail-on-cycles true
+                :fail-on-violations true}
+               (infer/generate-starter-config (.getPath root)))))
 
-  (it "prefers the first matching prefix when component names collide"
+  (it "includes fail gates in starter config on both arities"
+    (with-redefs [infer/source-ns-records (fn [_ _] [])
+                  infer/infer-allowed-deps (fn
+                                             ([_] {})
+                                             ([_ _] {}))]
+      (should= {:allowed-dependencies {}
+                :fail-on-cycles true
+                :fail-on-violations true}
+               (infer/generate-starter-config "src"))
+      (should= {:allowed-dependencies {}
+                :fail-on-cycles true
+                :fail-on-violations true}
+               (infer/generate-starter-config))))
+
+  (it "includes ignored components in starter config only when configured"
+    (with-redefs [infer/source-ns-records (fn [_ _] [])
+                  infer/infer-allowed-deps (fn
+                                             ([_] {})
+                                             ([_ _] {}))]
+      (should= {:allowed-dependencies {}
+                :fail-on-cycles true
+                :fail-on-violations true}
+               (infer/generate-starter-config "src"))
+      (should= {:allowed-dependencies {}
+                :ignored-components [:spec-runner]
+                :fail-on-cycles true
+                :fail-on-violations true}
+               (infer/generate-starter-config "src" #{:spec-runner}))))
+
+  (it "generates a starter config from inferred component dependencies"
     (let [root (temp-dir)]
-      (write-file! root "demo/ab/c.clj" "(ns demo.ab.c)\n(defprotocol P (x [this]))\n")
-      (write-file! root "demo/ab/d.clj" "(ns demo.ab.d)\n(defn d [] :ok)\n")
-      (write-file! root "demo/ab_c/core.clj" "(ns demo.ab-c.core)\n(defn c [] :ok)\n")
-      (let [cfg (#'tool/generate-starter-config [(.getPath root)])
-            by-component (into {} (map (juxt :component identity) (:component-rules cfg)))]
-        (should= "demo.ab-c*" (:match (get by-component :ab-c))))))
+      (write-file! root "demo/alpha/core.clj" "(ns demo.alpha.core (:require [demo.beta.api :as b]))\n")
+      (write-file! root "demo/beta/api.clj" "(ns demo.beta.api)\n")
+      (should= {:allowed-dependencies {:alpha [:beta]
+                                       :beta []}
+                :fail-on-cycles true
+                :fail-on-violations true}
+               (#'tool/generate-starter-config (.getPath root)))))
+
+  (it "infers dependencies while omitting ignored components"
+    (let [records [{:namespace "demo.alpha.core"
+                    :requires #{"demo.beta.api" "demo.spec-runner.main"}}
+                   {:namespace "demo.beta.api"
+                    :requires #{}}
+                   {:namespace "demo.spec-runner.main"
+                    :requires #{"demo.beta.api"}}]]
+      (should= {:alpha [:beta]
+                :beta []}
+               (infer/infer-allowed-deps records #{:spec-runner}))))
 
   (it "computes strongly connected components for cyclic and acyclic graphs"
     (let [nodes #{:a :b :c :d}
@@ -525,22 +525,6 @@
       (should (contains? sets #{:a :b}))
       (should (contains? sets #{:c}))
       (should (contains? sets #{:d}))))
-
-  (it "keeps self-loop nodes as single-node components in SCC output"
-    (let [nodes #{:x :y}
-          edges [[:x :x]]
-          sccs (#'tool/strongly-connected-components nodes edges)
-          sets (set (map set sccs))]
-      (should (contains? sets #{:x}))
-      (should (contains? sets #{:y}))))
-
-  (it "handles edges to already-visited nodes that are no longer on stack"
-    (let [nodes #{:a :b :c}
-          edges [[:a :b] [:b :c] [:c :b] [:a :c]]
-          sccs (#'tool/strongly-connected-components nodes edges)
-          sets (set (map set sccs))]
-      (should (contains? sets #{:a}))
-      (should (contains? sets #{:b :c}))))
 
   (it "finds forbidden violations only for matching component pairs"
     (let [ns-edges [{:from-component :ui
@@ -556,6 +540,24 @@
           violations (#'graph/find-forbidden-violations ns-edges forbidden [])]
       (should= 1 (count violations))
       (should= :ui (:from-component (first violations)))
-      (should= :db (:to-component (first violations)))
-      (should= {:from :ui :to :db}
-               (select-keys (:rule (first violations)) [:from :to])))))
+      (should= :db (:to-component (first violations)))))
+
+  (it "ignores forbidden rules whose component pair does not match the edge"
+    (let [ns-edges [{:from-component :ui
+                     :to-component :svc
+                     :from-ns "demo.ui.core"
+                     :to-ns "demo.svc.core"}]
+          forbidden [{:from :ui :to :db}
+                     {:from :worker :to :svc}]]
+      (should= [] (#'graph/find-forbidden-violations ns-edges forbidden []))))
+
+  (it "ignores non-matching forbidden rules through analyze-project"
+    (let [root (temp-dir)]
+      (write-file! root "demo/ui/core.clj"
+                   "(ns demo.ui.core (:require [demo.svc.core :as svc]))\n(defn run [] (svc/run))\n")
+      (write-file! root "demo/svc/core.clj"
+                   "(ns demo.svc.core)\n(defn run [] :ok)\n")
+      (let [result (tool/analyze-project {:forbidden-dependencies [{:from :ui :to :db}
+                                                                   {:from :worker :to :svc}]}
+                                         (.getPath root))]
+        (should= [] (:violations result))))))

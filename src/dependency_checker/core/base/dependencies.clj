@@ -1,4 +1,4 @@
-;; mutation-tested: 2026-03-07
+;; mutation-tested: 2026-03-11
 (ns dependency-checker.core.base.dependencies
   (:require [clojure.set :as set]))
 

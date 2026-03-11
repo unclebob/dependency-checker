@@ -1,4 +1,4 @@
-;; mutation-tested: 2026-03-07
+;; mutation-tested: 2026-03-11
 (ns dependency-checker.core.graph
   (:require [dependency-checker.core.base.config :as cfg]
             [dependency-checker.core.base.parse :as parse]))
@@ -86,13 +86,13 @@
        vec))
 
 (defn build-ns-edges
-  [parsed ns->entry component-rules]
+  [parsed ns->entry project-roots]
   (->> parsed
        (mapcat (fn [{:keys [namespace component requires]}]
                  (for [dep requires
                        :let [dep-entry (get ns->entry dep)
                              dep-component (or (:component dep-entry)
-                                               (cfg/component-for-ns component-rules dep))]
+                                               (cfg/namespace-component project-roots dep))]
                        :when (and component dep-component)]
                    {:from-ns (str namespace)
                     :to-ns (str dep)
@@ -142,11 +142,12 @@
   [ns-edges forbidden-rules exceptions]
   (->> ns-edges
        (mapcat (fn [edge]
-                 (for [{:keys [from to] :as rule} forbidden-rules
-                       :when (and (= from (:from-component edge))
-                                  (= to (:to-component edge)))
-                       :when (not (some #(cfg/exception-matches? % edge) exceptions))]
-                   (assoc edge :rule rule))))
+                 (keep (fn [{:keys [from to] :as rule}]
+                         (when (and (= from (:from-component edge))
+                                    (= to (:to-component edge))
+                                    (not (some #(cfg/exception-matches? % edge) exceptions)))
+                           (assoc edge :rule rule)))
+                       forbidden-rules)))
        vec))
 
 (defn find-allowed-violations
@@ -166,31 +167,55 @@
     (find-allowed-violations ns-edges allowed-deps exceptions)
     (find-forbidden-violations ns-edges forbidden-rules exceptions)))
 
+(defn- active-entry?
+  [ignored-components {:keys [component]}]
+  (not (contains? ignored-components component)))
+
+(defn- active-edge?
+  [ignored-components {:keys [from-component to-component]}]
+  (and (not (contains? ignored-components from-component))
+       (not (contains? ignored-components to-component))))
+
 (defn analyze-project
-  [config]
-  (let [merged-config (merge cfg/default-config config)
-        component-rules (cfg/compile-component-rules (:component-rules merged-config))
-        files (cfg/source-files (:source-paths merged-config) (:include-exts merged-config))
-        parsed (->> files (map #(parse/parse-source-entry % component-rules)) (filter some?) vec)
-        warnings (aggregate-warnings parsed)
-        ns->entry (into {} (map (juxt :namespace identity) parsed))
-        component-set (->> parsed (map :component) (filter some?) set)
-        ns-edges (build-ns-edges parsed ns->entry component-rules)
+  ([config]
+   (analyze-project config "src"))
+  ([config source-path]
+   (cfg/validate-config! config)
+   (let [merged-config (merge cfg/default-config config)
+         ignored-components (cfg/ignored-components-set merged-config)
+         files (cfg/source-files [source-path] (:include-exts merged-config))
+         parsed* (->> files (map parse/parse-source-entry) (filter some?) vec)
+         project-roots (->> parsed* (map :namespace) (map cfg/namespace-root) set)
+         parsed-with-components (mapv (fn [entry]
+                                        (assoc entry :component (cfg/namespace-component project-roots (:namespace entry))))
+                                      parsed*)
+         parsed (filterv (partial active-entry? ignored-components) parsed-with-components)
+         warnings (aggregate-warnings parsed)
+         ns->entry (into {} (map (juxt :namespace identity) parsed))
+         component-set (->> parsed (map :component) (filter some?) set)
+         ns-edges (->> (build-ns-edges parsed ns->entry project-roots)
+                       (filter (partial active-edge? ignored-components))
+                       vec)
         component-edges (->> ns-edges
                              (map (juxt :from-component :to-component))
                              set)
         {:keys [incoming outgoing]} (neighbor-maps component-set component-edges)
-        component-stats (component-stats-map component-set parsed incoming outgoing)
-        exceptions (mapv cfg/compile-exception (:allowed-exceptions merged-config))
-        allowed-deps (:allowed-dependencies merged-config)
-        forbidden-rules (mapv cfg/normalize-forbidden-rule (:forbidden-dependencies merged-config))
-        violations (find-violations ns-edges allowed-deps forbidden-rules exceptions)
-        sccs (strongly-connected-components component-set (remove (fn [[a b]] (= a b)) component-edges))
-        cycles (->> sccs (filter #(> (count %) 1)) vec)]
-    {:config merged-config
+         component-stats (component-stats-map component-set parsed incoming outgoing)
+         exceptions (mapv cfg/compile-exception (:allowed-exceptions merged-config))
+         allowed-deps (apply dissoc (:allowed-dependencies merged-config) ignored-components)
+         forbidden-rules (->> (:forbidden-dependencies merged-config)
+                              (map cfg/normalize-forbidden-rule)
+                              (remove (fn [{:keys [from to]}]
+                                        (or (contains? ignored-components from)
+                                            (contains? ignored-components to))))
+                              vec)
+         violations (find-violations ns-edges allowed-deps forbidden-rules exceptions)
+         sccs (strongly-connected-components component-set (remove (fn [[a b]] (= a b)) component-edges))
+         cycles (->> sccs (filter #(> (count %) 1)) vec)]
+     {:config merged-config
      :namespaces parsed
      :component-edges (sort component-edges)
      :component-stats component-stats
      :warnings warnings
      :violations violations
-     :cycles cycles}))
+      :cycles cycles})))
