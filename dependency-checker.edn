@@ -1,0 +1,4 @@
+{:allowed-dependencies {:cli [], :core [:cli]},
+ :ignored-components [:spec-runner],
+ :fail-on-cycles true,
+ :fail-on-violations true}
