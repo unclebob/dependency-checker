@@ -74,8 +74,8 @@
   (if (failure? result) 1 0))
 
 (defn- text-output
-  [result]
-  (report-text result)
+  [result opts]
+  (report-text result opts)
   (if (failure? result) 1 0))
 
 (defn- unsupported-format-output
@@ -117,14 +117,13 @@
 (def handle-analysis-exception* handle-analysis-exception)
 
 (defn- run-analysis!
-  [{:keys [config-path source-path fmt]}]
+  [{:keys [config-path source-path fmt color? edges?]}]
   (try
     (let [result (analyze-project (load-config config-path) source-path)
-          format-handler ({:edn edn-output
-                           :text text-output}
-                          fmt)]
-      (if format-handler
-        (format-handler result)
+          opts {:color? color? :edges? edges?}]
+      (case fmt
+        :edn (edn-output result)
+        :text (text-output result opts)
         (unsupported-format-output fmt)))
     (catch clojure.lang.ExceptionInfo ex
       (handle-analysis-exception config-path source-path ex))))

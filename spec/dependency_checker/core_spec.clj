@@ -9,6 +9,7 @@
             [dependency-checker.core.base.stats :as stats-base]
             [dependency-checker.core.graph :as graph]
             [dependency-checker.core.infer :as infer]
+            [dependency-checker.core.report :as report]
             [speclj.core :refer :all]))
 
 (defn- temp-dir []
@@ -56,7 +57,26 @@
         (should= 1 (get-in stats [:alpha :abstract-vars]))
         (should (< (Math/abs (- 0.6666666666666666 (get-in stats [:alpha :instability]))) 1.0e-9))
         (should (< (Math/abs (- 1.0 (get-in stats [:alpha :abstractness]))) 1.0e-9))
-        (should (< (Math/abs (- 0.6666666666666666 (get-in stats [:alpha :distance]))) 1.0e-9)))))
+        (should (< (Math/abs (- 0.6666666666666666 (get-in stats [:alpha :distance]))) 1.0e-9))
+        (should= :useless (get-in stats [:alpha :zone]))
+        (should= :pain (get-in stats [:beta :zone])))))
+
+  (it "uses healthy-threshold from config for zone classification"
+    (let [root (temp-dir)]
+      (write-file! root "demo/a.clj"
+                   "(ns demo.a (:require [demo.b :as b]))\n(defn a-fn [] :ok)\n")
+      (write-file! root "demo/b.clj"
+                   "(ns demo.b)\n(defn b-fn [] :ok)\n")
+      (let [default-result (tool/analyze-project
+                            {:allowed-dependencies {:a [] :b []}}
+                            (.getPath root))
+            wide-result (tool/analyze-project
+                         {:allowed-dependencies {:a [] :b []}
+                          :healthy-threshold 0.5}
+                         (.getPath root))]
+        (should= :pain (get-in (:component-stats default-result) [:b :zone]))
+        (should= :healthy (get-in (:component-stats wide-result) [:a :zone]))
+        (should= :pain (get-in (:component-stats wide-result) [:b :zone])))))
 
   (it "supports allowed exceptions for disallowed component dependencies"
     (let [root (temp-dir)]
@@ -139,6 +159,69 @@
       (should= 0 (:code help-output))
       (should (str/includes? (:text help-output) "[config.edn] [--source-path path]"))))
 
+  (it "classifies components into zones based on abstractness and instability"
+    (should= :pain (graph/classify-zone 0.0 0.0 0.3))
+    (should= :pain (graph/classify-zone 0.1 0.2 0.3))
+    (should= :useless (graph/classify-zone 1.0 1.0 0.3))
+    (should= :useless (graph/classify-zone 0.8 0.8 0.3))
+    (should= :healthy (graph/classify-zone 0.0 1.0 0.3))
+    (should= :healthy (graph/classify-zone 1.0 0.0 0.3))
+    (should= :healthy (graph/classify-zone 0.5 0.5 0.3)))
+
+  (it "classifies zones using a custom healthy-threshold"
+    (should= :healthy (graph/classify-zone 0.3 0.3 0.5))
+    (should= :pain (graph/classify-zone 0.3 0.3 0.1))
+    (should= :healthy (graph/classify-zone 0.8 0.8 0.7))
+    (should= :useless (graph/classify-zone 0.8 0.8 0.1)))
+
+  (it "colorizes zone labels with ANSI codes and intensity based on distance"
+    (let [deep-pain (report/colorize-zone :pain 1.0 0.3)
+          mild-pain (report/colorize-zone :pain 0.35 0.3)
+          deep-useless (report/colorize-zone :useless 1.0 0.3)
+          healthy (report/colorize-zone :healthy 0.0 0.3)
+          mild-healthy (report/colorize-zone :healthy 0.25 0.3)]
+      (should (str/includes? deep-pain "pain"))
+      (should (str/includes? mild-pain "pain"))
+      (should (str/includes? deep-useless "useless"))
+      (should (str/includes? healthy "healthy"))
+      (should (str/includes? mild-healthy "healthy"))
+      (should (str/includes? deep-pain "\u001b["))
+      (should (str/includes? deep-useless "\u001b["))
+      (should (str/includes? healthy "\u001b["))))
+
+  (it "omits ANSI codes when color is disabled"
+    (let [report (with-out-str
+                   (report/report-text
+                    {:component-stats {:alpha {:fan-in 0
+                                               :fan-out 0
+                                               :instability 0.0
+                                               :abstractness 0.0
+                                               :distance 1.0
+                                               :zone :pain}}
+                     :component-edges []
+                     :warnings []
+                     :violations []
+                     :cycles []}
+                    {:color? false}))]
+      (should (str/includes? report "pain"))
+      (should-not (str/includes? report "\u001b["))))
+
+  (it "includes Zone column in text report"
+    (let [report (with-out-str
+                   (#'tool/report-text
+                    {:component-stats {:alpha {:fan-in 0
+                                               :fan-out 0
+                                               :instability 0.0
+                                               :abstractness 0.0
+                                               :distance 1.0
+                                               :zone :pain}}
+                     :component-edges []
+                     :warnings []
+                     :violations []
+                     :cycles []}))]
+      (should (str/includes? report "Zone"))
+      (should (str/includes? report "pain"))))
+
   (it "formats text report with warnings, violations, and cycles"
     (let [report (with-out-str
                    (#'tool/report-text
@@ -146,7 +229,8 @@
                                                :fan-out 2
                                                :instability 0.66
                                                :abstractness 0.10
-                                               :distance 0.24}}
+                                               :distance 0.24
+                                               :zone :pain}}
                      :component-edges [[:alpha :beta]]
                      :warnings [{:namespace "demo.a" :callee "requiring-resolve" :targets ["demo.b"]}]
                      :violations [{:from-component :alpha
@@ -154,10 +238,30 @@
                                    :from-ns "demo.a"
                                    :to-ns "demo.b"}]
                      :cycles [[:alpha :beta]]}))]
+      (should (str/includes? report "Component Dependencies"))
+      (should (str/includes? report ":alpha -> :beta"))
       (should (str/includes? report "Warnings: 1"))
       (should (str/includes? report "demo.a uses requiring-resolve -> demo.b"))
       (should (str/includes? report "Boundary Violations"))
       (should (str/includes? report "Cycles"))))
+
+  (it "omits Component Dependencies when edges? is false"
+    (let [report (with-out-str
+                   (#'tool/report-text
+                    {:component-stats {:alpha {:fan-in 1
+                                               :fan-out 2
+                                               :instability 0.66
+                                               :abstractness 0.10
+                                               :distance 0.24
+                                               :zone :pain}}
+                     :component-edges [[:alpha :beta]]
+                     :warnings []
+                     :violations []
+                     :cycles []}
+                    {:edges? false}))]
+      (should-not (str/includes? report "Component Dependencies"))
+      (should-not (str/includes? report ":alpha -> :beta"))
+      (should (str/includes? report "Component Metrics"))))
 
   (it "computes failure output status from configured gates"
     (should (#'tool/failure? {:config {:fail-on-violations true
@@ -183,10 +287,10 @@
                        :violations [{:from-component :a}]
                        :cycles []}
           out (java.io.StringWriter.)]
-      (with-redefs [tool/report-text (fn [_] (println "report"))]
+      (with-redefs [tool/report-text (fn [_ _] (println "report"))]
         (binding [*out* out]
-          (should= 0 (#'tool/text-output ok-result))
-          (should= 1 (#'tool/text-output fail-result))))
+          (should= 0 (#'tool/text-output ok-result {}))
+          (should= 1 (#'tool/text-output fail-result {}))))
       (binding [*out* out]
         (should= 0 (#'tool/edn-output ok-result))
         (should= 1 (#'tool/edn-output fail-result)))))
@@ -229,11 +333,13 @@
                      :warnings []}]
       (with-redefs [tool/load-config (fn [_] {})
                     tool/analyze-project (fn [_ _] ok-result)
-                    tool/report-text (fn [_] (println "text-report"))]
+                    tool/report-text (fn [_ _] (println "text-report"))]
         (binding [*out* text-out]
           (should= 0 (#'tool/run-analysis! {:config-path cfg-path
                                             :source-path "src"
-                                            :fmt :text})))
+                                            :fmt :text
+                                            :color? true
+                                            :edges? true})))
         (binding [*out* edn-out]
           (should= 0 (#'tool/run-analysis! {:config-path cfg-path
                                             :source-path "src"
@@ -270,7 +376,17 @@
       (should= :text (:fmt defaults))
       (should= false (:help? defaults))
       (should= false (:init? defaults))
-      (should= false (:force-init? defaults))))
+      (should= false (:force-init? defaults))
+      (should= true (:color? defaults))
+      (should= true (:edges? defaults))))
+
+  (it "parses --no-color flag"
+    (let [parsed (#'tool/parse-args ["--no-color"])]
+      (should= false (:color? parsed))))
+
+  (it "parses --no-edges flag"
+    (let [parsed (#'tool/parse-args ["--no-edges"])]
+      (should= false (:edges? parsed))))
 
   (it "parses explicit config path source path and options"
     (let [parsed (#'tool/parse-args ["cfg.edn" "--source-path" "lib" "--format" "edn" "--init"])]
@@ -323,7 +439,8 @@
                                             :component-edges []
                                             :warnings []})
                     tool/report-text (fn [& _] nil)]
-        (should= 2 (#'tool/run-cli [cfg-path "--format" "xml"])))))
+        (binding [*err* (java.io.StringWriter.)]
+          (should= 2 (#'tool/run-cli [cfg-path "--format" "xml"]))))))
 
   (it "run-cli returns 0 for --help"
     (let [out (java.io.StringWriter.)]

@@ -8,6 +8,7 @@
    :allowed-dependencies {}
    :allowed-exceptions []
    :ignored-components #{}
+   :healthy-threshold 0.3
    :fail-on-cycles true
    :fail-on-violations true})
 
